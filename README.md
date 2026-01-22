@@ -34,7 +34,7 @@ While sharing the same conceptual goal as its predecessors, this project introdu
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/lxbme/MCRW.git](https://github.com/lxbme/MCRW.git)
+   git clone https://github.com/lxbme/MCRW.git
    cd MCRW
    ```
 
