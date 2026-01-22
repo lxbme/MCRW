@@ -43,7 +43,7 @@ While sharing the same conceptual goal as its predecessors, this project introdu
 
 3. Place your `server.jar` in the root directory and ensure you have accepted the Minecraft EULA.
 
-4. Place your plugins in `./lua_plugins`.
+4. Place your plugins in `./lua_plugins/`.
 
 ### Usage
 
@@ -56,6 +56,40 @@ cargo run --release -- -Xmx1024M -Xms1024M -jar server.jar nogui
 The console Arguments will be passed to Java without any modification.
 
 Once running, the wrapper will start the Minecraft server as a child process. You can interact with the server console directly through the terminal, and loaded Lua plugins will begin monitoring log output immediately.
+
+## Plugin Development
+
+Plugins are located in the `lua_plugins/` directory. Each plugin must have an `init.lua` entry point.
+
+Example structure:
+
+```
+lua_plugins/
+  my_plugin/
+    init.lua
+    utils.lua
+```
+
+A simple plugin example:
+
+```lua
+-- plugins/my_plugin/init.lua
+
+-- Use relative requiring for local modules
+local utils = require( ... .. ".utils")
+
+-- Register a regex listener
+wrapper:register(
+    "\\[.*\\]: <(.*?)> !hello",
+    function(line, player)
+        return {
+            "tellraw " .. player .. " {\"text\":\"Hello from Rust!\"}"
+        }
+    end
+)
+```
+
+Find more examples: https://github.com/lxbme/mcrw_lua_plugins
 
 ## Contributing
 
