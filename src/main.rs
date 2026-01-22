@@ -17,6 +17,7 @@
 mod utils;
 mod lua_ctx;
 
+use std::env;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -29,11 +30,12 @@ use lua_ctx::{TriggerList, WrapperApi, TriggerListWrapper};
 async fn main() {
     utils::print_logo();
     let max_cmd_queue = 1000;
-    let server_path = "server.jar";
-    let plugin_dir = "lua_plugins";
-    let root_path = std::env::current_dir().unwrap();
-    let plugin_root_path = root_path.join(plugin_dir);
-    println!("{}", plugin_root_path.display());
+    let server_args: Vec<String> = env::args().collect();
+    // let server_path = "server.jar";
+    // let plugin_dir = "lua_plugins";
+    // let root_path = std::env::current_dir().unwrap();
+    // let plugin_root_path = root_path.join(plugin_dir);
+    // println!("{}", plugin_root_path.display());
     // let all_plugins_path = utils::get_all_plugins_path(plugin_root_path);
 
     // prepare lua vm
@@ -46,12 +48,13 @@ async fn main() {
     lua_ctx::load_plugins(&lua).expect("[MCRW] [PANIC] Fail to load plugins");
     println!("[MCRW] Lua script loaded. Registered {} triggers.", triggers.lock().unwrap().len());
 
-    println!("[MCRW] Starting server...");
+    println!("[MCRW] Starting server with args: {}", server_args.join(" "));
     let mut child = Command::new("java")
-        .args(&["-Xmx1024M", "-Xms1024M", "-jar", server_path, "nogui"])
+        // .args(&["-Xmx1024M", "-Xms1024M", "-jar", server_path, "nogui"])
+        .args(&server_args[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .spawn().expect("[MCRW] [PANIC] Fail to minecraft server: {}");
+        .spawn().expect("[MCRW] [PANIC] Fail to minecraft server");
     println!("[MCRW] Server Started.");
 
     let stdout = child.stdout.take().expect("Failed to open stdout");
