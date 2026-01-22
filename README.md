@@ -70,6 +70,7 @@ lua_plugins/
   my_plugin/
     init.lua
     utils.lua
+    config.json
 ```
 
 A simple plugin example:
@@ -83,15 +84,28 @@ local utils = require( ... .. ".utils")
 -- get rust wrapper instance
 local wrapper = Server:get_context(...)
 
+-- load config
+local config = wrapper:load_config({
+    color = "green",
+    enable_hello = true
+})
+
 -- Register a regex listener
-wrapper:register(
-    "\\[.*\\]: <(.*?)> !hello",
-    function(line, player)
-        return {
-            "tellraw " .. player .. " {\"text\":\"Hello from Rust!\"}"
-        }
-    end
-)
+if config.enable_hello then
+    wrapper:register(
+        "\\[.*\\]: <(.*?)> !hello",
+        function(line, player)
+            wrapper:log("Received hello command from " .. player)
+            
+            local msg = utils.get_welcome_msg(player)
+            
+            return {
+                "tellraw " .. player .. " {\"text\":\"" .. msg .. "\",\"color\":\"" .. config.color ..  "\"}",
+                "playsound entity.experience_orb.pickup master " .. player
+            }
+        end
+    )
+end
 ```
 
 Find more examples: https://github.com/lxbme/mcrw_lua_plugins

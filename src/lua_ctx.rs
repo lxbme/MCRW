@@ -22,6 +22,8 @@ use std::{
 
 use mlua::{Function, Lua, RegistryKey, Table, UserData, UserDataMethods, Value};
 use regex::Regex;
+use serde_json::Value as JsonValue;
+use mlua::LuaSerdeExt;
 
 pub struct Trigger {
     pub regex: Regex,
@@ -59,6 +61,36 @@ impl UserData for PluginApi {
                 Ok(())
             },
         );
+
+        methods.add_method("load_config",
+        |lua: &Lua, this: &PluginApi, default_cfg: Value| {
+            let config_path = Path::new("lua_plugins")
+                .join(&this.plugin_name)
+                .join("config.json");
+            let mut final_config: JsonValue = lua.from_value(default_cfg)?;
+            println!("{}",config_path.display());
+
+            if config_path.exists() {
+                // if exists: read config file
+                let content = fs::read_to_string(&config_path)
+                    .map_err(|e| mlua::Error::external(format!("Failed to read config: {}", e)))?;
+                
+                let file_config: JsonValue = serde_json::from_str(&content)
+                    .map_err(|e| mlua::Error::external(format!("Config JSON syntax error: {}", e)))?;
+                final_config = file_config;
+            } else {
+                // if not exists: save default config
+                let json_str = serde_json::to_string_pretty(&final_config)
+                    .map_err(|e| mlua::Error::external(e))?;
+                
+                fs::write(&config_path, json_str)
+                    .map_err(|e| mlua::Error::external(format!("Failed to write config: {}", e)))?;
+                
+                println!("[{}] Created new config file.", this.plugin_name);
+            }
+            let result_lua_value = lua.to_value(&final_config)?;
+            Ok(result_lua_value)
+        });
     }
 }
 
