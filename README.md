@@ -80,6 +80,9 @@ A simple plugin example:
 -- Use relative requiring for local modules
 local utils = require( ... .. ".utils")
 
+-- get rust wrapper instance
+local wrapper = Server:get_context(...)
+
 -- Register a regex listener
 wrapper:register(
     "\\[.*\\]: <(.*?)> !hello",
