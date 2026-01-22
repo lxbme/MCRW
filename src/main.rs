@@ -14,15 +14,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+mod handler;
 mod lua_ctx;
 mod utils;
 
-use lua_ctx::{TriggerList};
-use mlua::{Function, Lua, Value};
+use lua_ctx::TriggerList;
+use mlua::Lua;
 use std::env;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -44,15 +44,17 @@ async fn main() {
         .set("Server", server_api)
         .expect("[MCRW] [PANIC] Fail to attach Server to lua");
 
+    // load plugins
     lua_ctx::load_plugins(&lua).expect("[MCRW] [PANIC] Fail to load plugins");
     println!(
         "[MCRW] Lua script loaded. Registered {} triggers.",
         triggers.lock().unwrap().len()
     );
 
+    // start minecraft server
     println!(
         "[MCRW] Starting server with args: {}",
-        server_args.join(" ")
+        server_args[1..].join(" ")
     );
     let mut child = Command::new("java")
         .args(&server_args[1..])
@@ -63,88 +65,17 @@ async fn main() {
     println!("[MCRW] Server Started.");
 
     let stdout = child.stdout.take().expect("Failed to open stdout");
-    let mut stdin = child.stdin.take().expect("Failed to open stdin");
-    let mut reader = BufReader::new(stdout).lines();
+    let stdin = child.stdin.take().expect("Failed to open stdin");
 
-    let (tx, mut rx) = mpsc::channel::<String>(max_cmd_queue);
+    // init game command channel
+    let (tx, rx) = mpsc::channel::<String>(max_cmd_queue);
 
     // Command consumer
-    tokio::spawn(async move {
-        while let Some(cmd) = rx.recv().await {
-            let cmd_with_newline: String = if cmd.ends_with('\n') {
-                cmd
-            } else {
-                format!("{}\n", cmd)
-            };
-            if let Err(e) = stdin.write_all(cmd_with_newline.as_bytes()).await {
-                eprintln!("[Error] Failed to write to server stdin: {}", e);
-                break;
-            }
-            if let Err(e) = stdin.flush().await {
-                eprintln!("[Error] Failed to flush stdin: {}", e);
-                break;
-            }
-        }
-    });
+    handler::spawn_cmd_sender(rx, stdin);
 
     // CMD producer: terminal stdin
-    let tx_for_terminal: mpsc::Sender<String> = tx.clone();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(tokio::io::stdin());
-        let mut line = String::new();
-
-        while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-            // send cmd to channel
-            if tx_for_terminal.send(line.clone()).await.is_err() {
-                break; // channel is closed
-            }
-            line.clear();
-        }
-    });
+    handler::spawn_terminal_receiver(tx.clone());
 
     // main loop producer
-    let tx_main = tx.clone();
-    while let Some(line) = reader.next_line().await.expect("Fail to read line") {
-        println!("[MC] {}", line);
-
-        let mut commands_to_exec: Vec<String> = Vec::new();
-
-        // trigger gard field
-        {
-            let triggers_gard = triggers
-                .lock()
-                .expect("[MCRW] [PANIC] Fail to lock trigger list");
-            for trigger in triggers_gard.iter() {
-                if let Some(caps) = trigger.regex.captures(&line) {
-                    // prepare args for lua callback
-                    let mut args = Vec::new();
-                    args.push(Value::String(lua.create_string(&line).unwrap())); // full line for first
-
-                    for i in 1..caps.len() {
-                        let cap_str: &str =
-                            caps.get(i).map_or("", |m: regex::Match<'_>| m.as_str());
-                        args.push(Value::String(lua.create_string(cap_str).unwrap()));
-                    }
-
-                    // fetch call back and execute
-                    let func: Function = lua.registry_value(&trigger.callback).unwrap();
-
-                    // get return and add to commands_to_exec vec
-                    let result: Option<Vec<String>> = func
-                        .call(mlua::Variadic::from_iter(args))
-                        .expect("[MCRW] Fail to execute callback: {}");
-                    if let Some(cmds) = result {
-                        commands_to_exec.extend(cmds);
-                    }
-                }
-            }
-        } // lock gard release here
-
-        for cmd in commands_to_exec {
-            match tx_main.send(format!("{}\n", cmd)).await {
-                Ok(_) => println!("[MCRW -> Server]: {}", cmd),
-                Err(_) => println!("[MCRW] Fail to send cmd: {}", cmd),
-            };
-        }
-    }
+    handler::run_main_loop(stdout, tx.clone(), triggers, lua).await;
 }
