@@ -15,58 +15,26 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 mod utils;
+mod lua_ctx;
 
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use regex::Regex;
-use mlua::{Function, Lua, RegistryKey, UserData, UserDataMethods, Value};
+use mlua::{Function, Lua, Value};
 use std::sync::{Arc, Mutex};
-
-struct Trigger {
-    regex: Regex,
-    callback: RegistryKey
-}
-
-// list of lua plugins callback
-type TriggerList = Arc<Mutex<Vec<Trigger>>>;
-
-#[derive(Clone)]
-struct TriggerListWrapper(pub TriggerList);
-
-impl UserData for TriggerListWrapper {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        let _ = methods;
-    }
-}
-
-// Api for lua plugins
-#[derive(Clone)]
-struct WrapperApi;
-
-impl UserData for WrapperApi {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("register", |lua, _this, (pattern, func): (String, Function)| {
-            let regex = Regex::new(&pattern).map_err(|e| mlua::Error::external(e))?;
-            let callback = lua.create_registry_value(func)?;
-            let triggers_check: mlua::AnyUserData = lua.globals().get("__internal_triggers")?;
-            let trigger_list: TriggerListWrapper = triggers_check.borrow::<TriggerListWrapper>()?.clone();
-            trigger_list.0.lock().unwrap().push(Trigger { regex, callback });
-            
-            Ok(())
-        });
-    }
-}
+use lua_ctx::{TriggerList, WrapperApi, TriggerListWrapper};
 
 #[tokio::main]
 async fn main() {
     utils::print_logo();
     let max_cmd_queue = 1000;
     let server_path = "server.jar";
-
-    let plugin_folder = "./lua_plugins";
-    let plugins_path = utils::get_all_plugins_path(plugin_folder);
+    let plugin_dir = "lua_plugins";
+    let root_path = std::env::current_dir().unwrap();
+    let plugin_root_path = root_path.join(plugin_dir);
+    println!("{}", plugin_root_path.display());
+    // let all_plugins_path = utils::get_all_plugins_path(plugin_root_path);
 
     // prepare lua vm
     let lua = Lua::new();
@@ -75,19 +43,7 @@ async fn main() {
     lua.globals().set("__internal_triggers", triggers_wrapper).expect("[MCRW] [PANIC] Fail to attach trigger list to lua");
     lua.globals().set("wrapper", WrapperApi).expect("[MCRW] [PANIC] Fail to attach wrapper to lua");
 
-    // load lua plugins
-    for path in plugins_path {
-        let script = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(e) => {
-                println!("[MCRW] Fail to load plugin [{}]: {}",&path.display() ,e); 
-                continue},
-        };
-        match lua.load(&script).exec() {
-            Ok(_) => println!("[MCRW] Plugin loaded: {}", &path.display()),
-            Err(e) => println!("[MCRW] Fail to execute plugin [{}]: {}",&path.display() ,e),
-        }
-    }
+    lua_ctx::load_plugins(&lua).expect("[MCRW] [PANIC] Fail to load plugins");
     println!("[MCRW] Lua script loaded. Registered {} triggers.", triggers.lock().unwrap().len());
 
     println!("[MCRW] Starting server...");

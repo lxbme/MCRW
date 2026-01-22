@@ -14,18 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::path::PathBuf;
-use walkdir::WalkDir;
-
-pub fn get_all_plugins_path(path: &str) -> Vec<PathBuf> {
-    WalkDir::new(path)
-        .into_iter()
-        .filter_map(|e| e.ok()) 
-        .filter(|e| e.path().is_file()) 
-        .map(|e| e.path().to_owned()) 
-        .collect()
-}
-
 pub fn print_logo() {
     let logo = r#"
                     _      
