@@ -1,5 +1,7 @@
 # Minecraft Rust Wrapper (MCRW)
 
+![](./img/mcrw_title.png)
+
 A lightweight, high-performance middleware designed to wrap and manage Minecraft server instances. Written in **Rust**, it provides a robust event-driven architecture that allows users to extend server functionality using **Lua** scripts.
 
 ## Inspiration and Philosophy
