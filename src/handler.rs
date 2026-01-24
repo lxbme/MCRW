@@ -96,3 +96,24 @@ pub async fn run_main_loop(
         }
     }
 }
+
+pub async fn check_shutdown(mut child: tokio::process::Child) {
+    match child.wait().await {
+        Ok(status) => {
+            if status.success() {
+                println!("[MCRW] Minecraft server stopped gracefully (Exit Code: 0).");
+                // on server stop
+            } else {
+                let code = status.code().unwrap_or(-1);
+                eprintln!(
+                    "[MCRW] [WARNING] Minecraft server crashed or stopped unexpectedly! (Exit Code: {})",
+                    code
+                );
+                // on server crash
+            }
+        }
+        Err(e) => {
+            eprintln!("[MCRW] [ERROR] Failed to wait on child process: {}", e);
+        }
+    }
+}
