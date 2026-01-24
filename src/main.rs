@@ -78,4 +78,22 @@ async fn main() {
 
     // main loop producer
     handler::run_main_loop(stdout, tx.clone(), triggers, lua).await;
+
+    println!("[MCRW] Stdout stream ended. Waiting for process exit status...");
+
+    match child.wait().await {
+    Ok(status) => {
+        if status.success() {
+            println!("[MCRW] Minecraft server stopped gracefully (Exit Code: 0).");
+            // on server stop
+        } else {
+            let code = status.code().unwrap_or(-1);
+            eprintln!("[MCRW] [WARNING] Minecraft server crashed or stopped unexpectedly! (Exit Code: {})", code);
+            // on server crash
+        }
+    }
+    Err(e) => {
+        eprintln!("[MCRW] [ERROR] Failed to wait on child process: {}", e);
+    }
+}
 }
