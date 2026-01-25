@@ -30,21 +30,33 @@ pub struct Trigger {
     pub callback: RegistryKey,
 }
 
+pub struct StopTrigger {
+    pub callback: RegistryKey,
+}
+
+pub struct CrashTrigger {
+    pub callback: RegistryKey,
+}
+
 // global list of lua plugins callback
 pub type TriggerList = Arc<Mutex<Vec<Trigger>>>;
+pub type StopTriggerList = Arc<Mutex<Vec<StopTrigger>>>;
+pub type CrashTriggerList = Arc<Mutex<Vec<CrashTrigger>>>;
 
 // Api for lua plugins
 #[derive(Clone)]
 pub struct PluginApi {
     plugin_name: String,
     triggers: TriggerList,
+    stop_triggers: StopTriggerList,
+    crash_triggers: CrashTriggerList,
 }
 
 impl UserData for PluginApi {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method(
             "register",
-            |lua: &Lua, this: &PluginApi, (pattern, func): (String, Function)| {
+            |lua: &Lua, this: &Self, (pattern, func): (String, Function)| {
                 let regex = Regex::new(&pattern).map_err(|e| mlua::Error::external(e))?;
                 let callback = lua.create_registry_value(func)?;
                 this.triggers
@@ -55,7 +67,31 @@ impl UserData for PluginApi {
             },
         );
 
-        methods.add_method("log", |_lua: &Lua, this: &PluginApi, msg: String| {
+        methods.add_method(
+            "register_on_stop",
+            |lua: &Lua, this: &Self, func: Function| {
+                let callback = lua.create_registry_value(func)?;
+                this.stop_triggers
+                    .lock()
+                    .unwrap()
+                    .push(StopTrigger { callback });
+                Ok(())
+            },
+        );
+
+        methods.add_method(
+            "register_on_crash",
+            |lua: &Lua, this: &Self, func: Function| {
+                let callback = lua.create_registry_value(func)?;
+                this.crash_triggers
+                    .lock()
+                    .unwrap()
+                    .push(CrashTrigger { callback });
+                Ok(())
+            },
+        );
+
+        methods.add_method("log", |_lua: &Lua, this: &Self, msg: String| {
             println!("[{}] {}", this.plugin_name, msg);
             Ok(())
         });
@@ -100,6 +136,8 @@ impl UserData for PluginApi {
 
 pub struct ServerApi {
     pub triggers: TriggerList,
+    pub stop_triggers: StopTriggerList,
+    pub crash_triggers: CrashTriggerList,
 }
 
 impl UserData for ServerApi {
@@ -116,6 +154,8 @@ impl UserData for ServerApi {
                 Ok(PluginApi {
                     plugin_name,
                     triggers: this.triggers.clone(),
+                    stop_triggers: this.stop_triggers.clone(),
+                    crash_triggers: this.crash_triggers.clone(),
                 })
             },
         );
