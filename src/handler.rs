@@ -4,7 +4,7 @@ use tokio::{
     sync::mpsc,
 };
 
-use crate::lua_ctx::TriggerList;
+use crate::lua_ctx::{CrashTriggerList, StopTriggerList, TriggerList};
 
 pub fn spawn_cmd_sender(mut rx: mpsc::Receiver<String>, mut mc_stdin: tokio::process::ChildStdin) {
     // this routine will send cmd which is in channel to minecraft stdin
@@ -47,7 +47,7 @@ pub async fn run_main_loop(
     mc_stdout: tokio::process::ChildStdout,
     tx: mpsc::Sender<String>,
     triggers: TriggerList,
-    lua: Lua,
+    lua: &Lua,
 ) {
     let mut reader = BufReader::new(mc_stdout).lines();
 
@@ -80,7 +80,7 @@ pub async fn run_main_loop(
                     // get return and add to commands_to_exec vec
                     let result: Option<Vec<String>> = func
                         .call(mlua::Variadic::from_iter(args))
-                        .expect("[MCRW] Fail to execute callback: {}");
+                        .expect("[MCRW] Fail to execute callback");
                     if let Some(cmds) = result {
                         commands_to_exec.extend(cmds);
                     }
@@ -97,19 +97,41 @@ pub async fn run_main_loop(
     }
 }
 
-pub async fn check_shutdown(mut child: tokio::process::Child) {
+pub async fn check_shutdown(
+    lua: &Lua,
+    mut child: tokio::process::Child,
+    stop_triggers: StopTriggerList,
+    crash_triggers: CrashTriggerList,
+) {
     match child.wait().await {
         Ok(status) => {
             if status.success() {
                 println!("[MCRW] Minecraft server stopped gracefully (Exit Code: 0).");
                 // on server stop
+                let stop_triggers = stop_triggers
+                    .lock()
+                    .expect("[MCRW] [PANIC] Fail to lock stop_triggers");
+                for stop_trigger in stop_triggers.iter() {
+                    let func: Function = lua.registry_value(&stop_trigger.callback).unwrap();
+                    let _: () = func
+                        .call(mlua::Variadic::from_iter(Vec::<String>::new()))
+                        .expect("[MCWR] [PANIC] Fail to execute stop_trigger");
+                }
             } else {
                 let code = status.code().unwrap_or(-1);
                 eprintln!(
                     "[MCRW] [WARNING] Minecraft server crashed or stopped unexpectedly! (Exit Code: {})",
                     code
                 );
-                // on server crash
+                let crash_triggers = crash_triggers
+                    .lock()
+                    .expect("[MCRW] [PANIC] Fail to lock stop_triggers");
+                for crash_trigger in crash_triggers.iter() {
+                    let func: Function = lua.registry_value(&crash_trigger.callback).unwrap();
+                    let _: () = func
+                        .call(mlua::Variadic::from_iter(Vec::<String>::new()))
+                        .expect("[MCWR] [PANIC] Fail to execute stop_trigger");
+                }
             }
         }
         Err(e) => {
