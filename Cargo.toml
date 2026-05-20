@@ -1,7 +1,22 @@
 [package]
-name = "mc_wrapper"
+name = "mcrstw"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "A high-performance Minecraft server wrapper with Lua 5.4 plugin support."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/lxbme/MCRW"
+homepage = "https://github.com/lxbme/MCRW"
+readme = "README.md"
+keywords = ["minecraft", "wrapper", "lua", "plugin", "server"]
+categories = ["command-line-utilities", "game-development"]
+authors = ["lxbme"]
+exclude = [
+    "server/",
+    "img/",
+    "target/",
+    "*.log",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

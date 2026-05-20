@@ -188,7 +188,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mc_wrapper"
+name = "mcrstw"
 version = "0.1.0"
 dependencies = [
  "mlua",
