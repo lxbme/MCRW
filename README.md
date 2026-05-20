@@ -2,6 +2,10 @@
 
 ![](./img/mcrw_title.png)
 
+[![crates.io](https://img.shields.io/crates/v/mcrstw.svg)](https://crates.io/crates/mcrstw)
+[![downloads](https://img.shields.io/crates/d/mcrstw.svg)](https://crates.io/crates/mcrstw)
+[![license](https://img.shields.io/crates/l/mcrstw.svg)](./LICENSE)
+
 A lightweight, high-performance middleware designed to wrap and manage Minecraft server instances. Written in **Rust**, it provides a robust event-driven architecture that allows users to extend server functionality using **Lua** scripts.
 
 ## Inspiration and Philosophy
@@ -26,34 +30,47 @@ While sharing the same conceptual goal as its predecessors, this project introdu
 
 ### Prerequisites
 
-* Rust (latest stable toolchain)
+* Rust 1.85+ (only required for installation; not needed at runtime)
+* A C compiler (`gcc` / `clang` / MSVC) — needed once during install to build the vendored Lua 5.4 runtime
 * Java Runtime Environment (compatible with your target Minecraft server)
 * A Minecraft server JAR file (e.g., `server.jar`)
 
 ### Installation
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/lxbme/MCRW.git
-   cd MCRW
-   ```
+#### Recommended: install from [crates.io](https://crates.io/crates/mcrstw)
 
-2. Build the project in release mode for optimal performance:
-   ```bash
-   cargo build --release
-   ```
+```bash
+cargo install mcrstw
+```
 
-3. Place your `server.jar` in the root directory and ensure you have accepted the Minecraft EULA.
+This compiles and places the `mcrstw` binary in `~/.cargo/bin/` (make sure that directory is on your `PATH`). Lua 5.4 is bundled via the `vendored` feature of `mlua`, so no system Lua is required.
 
-4. Place your plugins in `./lua_plugins/`.
+To upgrade later:
+
+```bash
+cargo install mcrstw --force
+```
+
+#### Alternative: build from source
+
+```bash
+git clone https://github.com/lxbme/MCRW.git
+cd MCRW
+cargo build --release
+# binary lands at ./target/release/mcrstw
+```
+
+After installing by either method, create a working directory for your server, drop your `server.jar` into it, accept the Minecraft EULA, and place plugins under `./lua_plugins/`.
 
 ### Usage
 
-Run the wrapper directly via Cargo or by executing the binary:
+In the directory containing your `server.jar`, run:
 
 ```bash
-cargo run --release -- -Xmx1024M -Xms1024M -jar server.jar nogui
+mcrstw -Xmx1024M -Xms1024M -jar server.jar nogui
 ```
+
+If you built from source instead, run `./target/release/mcrstw ...` or `cargo run --release -- ...` with the same arguments.
 
 The console Arguments will be passed to Java without any modification.
 
