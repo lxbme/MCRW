@@ -59,6 +59,16 @@ The console Arguments will be passed to Java without any modification.
 
 Once running, the wrapper will start the Minecraft server as a child process. You can interact with the server console directly through the terminal, and loaded Lua plugins will begin monitoring log output immediately.
 
+### Wrapper Console Commands
+
+Lines you type into the wrapper terminal are forwarded to the Minecraft server stdin by default, with one exception: lines that match a wrapper built-in command are intercepted and handled by MCRW itself (and are **not** forwarded to the server).
+
+| Command   | Effect                                                              |
+|-----------|---------------------------------------------------------------------|
+| `!reload` | Clear all registered triggers and re-load every plugin from disk.   |
+
+`!reload` is intentionally accepted **only** from the wrapper terminal — there is no in-game equivalent, so no online player can trigger a reload.
+
 ## Plugin Development
 
 Plugins are located in the `lua_plugins/` directory. Each plugin must have an `init.lua` entry point and a `meta.toml` describing the plugin.
@@ -133,6 +143,8 @@ end
 ```
 
 Find more examples: https://github.com/lxbme/mcrw_lua_plugins
+
+> **Note on `!reload`:** Plugin module-level state (e.g. tables declared `local` at the top of `init.lua`) is **lost** when an operator runs `!reload` at the wrapper terminal. Persist anything you need to keep across reloads via `wrapper:load_config(...)` or another on-disk store.
 
 ## Contributing
 

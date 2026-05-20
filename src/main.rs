@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::lua_ctx::{CrashTriggerList, PluginRegistry, ServerApi, StopTriggerList};
+use crate::lua_ctx::{ControlMsg, CrashTriggerList, PluginRegistry, ServerApi, StopTriggerList};
 
 #[tokio::main]
 async fn main() {
@@ -85,15 +85,27 @@ async fn main() {
 
     // init game command channel
     let (tx, rx) = mpsc::channel::<String>(max_cmd_queue);
+    // wrapper control channel (e.g. `!reload` typed at wrapper terminal)
+    let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(16);
 
     // Command consumer
     handler::spawn_cmd_sender(rx, stdin);
 
     // CMD producer: terminal stdin
-    handler::spawn_terminal_receiver(tx.clone());
+    handler::spawn_terminal_receiver(tx.clone(), ctl_tx);
 
     // main loop producer
-    handler::run_main_loop(stdout, tx.clone(), triggers, &lua).await;
+    handler::run_main_loop(
+        stdout,
+        tx.clone(),
+        triggers,
+        stop_triggers.clone(),
+        crash_triggers.clone(),
+        plugins.clone(),
+        ctl_rx,
+        &lua,
+    )
+    .await;
 
     println!("[MCRW] Stdout stream ended. Waiting for process exit status...");
 

@@ -62,6 +62,11 @@ pub struct PluginMeta {
 // key: directory name
 pub type PluginRegistry = Arc<Mutex<HashMap<String, PluginMeta>>>;
 
+#[derive(Debug)]
+pub enum ControlMsg {
+    Reload,
+}
+
 // Api for lua plugins
 #[derive(Clone)]
 pub struct PluginApi {
@@ -257,5 +262,38 @@ pub fn load_plugins(lua: &Lua, registry: &PluginRegistry) -> mlua::Result<()> {
             registry.lock().unwrap().remove(&dirname);
         }
     }
+    Ok(())
+}
+
+pub fn reload_plugins(
+    lua: &Lua,
+    triggers: &TriggerList,
+    stop_triggers: &StopTriggerList,
+    crash_triggers: &CrashTriggerList,
+    plugins: &PluginRegistry,
+) -> mlua::Result<()> {
+    println!("[MCRW] Reloading plugins...");
+
+    triggers.lock().unwrap().clear();
+    stop_triggers.lock().unwrap().clear();
+    crash_triggers.lock().unwrap().clear();
+    plugins.lock().unwrap().clear();
+
+    let loaded: Table = lua.globals().get::<Table>("package")?.get("loaded")?;
+    let keys_to_clear: Vec<String> = loaded
+        .clone()
+        .pairs::<String, Value>()
+        .filter_map(|p| p.ok())
+        .map(|(k, _)| k)
+        .filter(|k| k.starts_with("lua_plugins"))
+        .collect();
+    for k in keys_to_clear {
+        loaded.set(k, Value::Nil)?;
+    }
+
+    load_plugins(lua, plugins)?;
+
+    let count = plugins.lock().unwrap().len();
+    println!("[MCRW] Reloaded {} plugins.", count);
     Ok(())
 }
