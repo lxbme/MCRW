@@ -22,12 +22,15 @@ use lua_ctx::TriggerList;
 use mlua::Lua;
 use std::collections::HashMap;
 use std::env;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::lua_ctx::{ControlMsg, CrashTriggerList, PluginRegistry, ServerApi, StopTriggerList};
+use crate::lua_ctx::{
+    ControlMsg, CrashTriggerList, LifecycleEvents, PluginRegistry, ServerApi, StopTriggerList,
+};
 
 #[tokio::main]
 async fn main() {
@@ -41,11 +44,16 @@ async fn main() {
     let stop_triggers: StopTriggerList = Arc::new(Mutex::new(Vec::new()));
     let crash_triggers: CrashTriggerList = Arc::new(Mutex::new(Vec::new()));
     let plugins: PluginRegistry = Arc::new(Mutex::new(HashMap::new()));
+    let trigger_cfg = lua_ctx::load_trigger_config(Path::new("trigger_config.toml"));
+    let lifecycle_events: LifecycleEvents = Arc::new(Mutex::new(
+        lua_ctx::compile_trigger_config(trigger_cfg),
+    ));
     let server_api = ServerApi {
         triggers: triggers.clone(),
         stop_triggers: stop_triggers.clone(),
         crash_triggers: crash_triggers.clone(),
         plugins: plugins.clone(),
+        lifecycle_events: lifecycle_events.clone(),
     };
     lua.globals()
         .set("Server", server_api)
@@ -102,6 +110,7 @@ async fn main() {
         stop_triggers.clone(),
         crash_triggers.clone(),
         plugins.clone(),
+        lifecycle_events.clone(),
         ctl_rx,
         &lua,
     )

@@ -67,6 +67,96 @@ pub enum ControlMsg {
     Reload,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PatternSpec {
+    pub text: String,
+    #[serde(default = "default_once")]
+    pub once: bool,
+}
+fn default_once() -> bool {
+    true
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct TriggerConfig {
+    #[serde(flatten)]
+    pub events: HashMap<String, Vec<PatternSpec>>,
+}
+
+pub struct CompiledPattern {
+    pub regex: Regex,
+    pub once: bool,
+    pub fired: bool,
+}
+
+pub struct LifecycleEventState {
+    pub patterns: Vec<CompiledPattern>,
+    pub callbacks: Vec<RegistryKey>,
+}
+
+pub type LifecycleEvents = Arc<Mutex<HashMap<String, LifecycleEventState>>>;
+
+fn builtin_trigger_config() -> TriggerConfig {
+    let mut events = HashMap::new();
+    events.insert(
+        "start".to_string(),
+        vec![PatternSpec {
+            text: r#"Done \([0-9.]+s\)! For help"#.to_string(),
+            once: true,
+        }],
+    );
+    TriggerConfig { events }
+}
+
+pub fn load_trigger_config(path: &Path) -> TriggerConfig {
+    let mut cfg = builtin_trigger_config();
+    match fs::read_to_string(path) {
+        Ok(s) => match toml::from_str::<TriggerConfig>(&s) {
+            Ok(user) => {
+                for (k, v) in user.events {
+                    cfg.events.insert(k, v);
+                }
+                println!("[MCRW] Loaded trigger_config.toml");
+            }
+            Err(e) => eprintln!("[MCRW] [ERROR] parse trigger_config.toml: {}", e),
+        },
+        Err(_) => {}
+    }
+    cfg
+}
+
+pub fn compile_trigger_config(cfg: TriggerConfig) -> HashMap<String, LifecycleEventState> {
+    cfg.events
+        .into_iter()
+        .map(|(name, patterns)| {
+            let compiled: Vec<CompiledPattern> = patterns
+                .into_iter()
+                .filter_map(|p| match Regex::new(&p.text) {
+                    Ok(regex) => Some(CompiledPattern {
+                        regex,
+                        once: p.once,
+                        fired: false,
+                    }),
+                    Err(e) => {
+                        eprintln!(
+                            "[MCRW] [ERROR] regex for event '{}': {} (pattern: {})",
+                            name, e, p.text
+                        );
+                        None
+                    }
+                })
+                .collect();
+            (
+                name,
+                LifecycleEventState {
+                    patterns: compiled,
+                    callbacks: Vec::new(),
+                },
+            )
+        })
+        .collect()
+}
+
 // Api for lua plugins
 #[derive(Clone)]
 pub struct PluginApi {
@@ -75,6 +165,7 @@ pub struct PluginApi {
     triggers: TriggerList,
     stop_triggers: StopTriggerList,
     crash_triggers: CrashTriggerList,
+    lifecycle_events: LifecycleEvents,
 }
 
 impl UserData for PluginApi {
@@ -112,6 +203,22 @@ impl UserData for PluginApi {
                     .lock()
                     .unwrap()
                     .push(CrashTrigger { callback });
+                Ok(())
+            },
+        );
+
+        methods.add_method(
+            "register_start",
+            |lua: &Lua, this: &Self, func: Function| {
+                let callback = lua.create_registry_value(func)?;
+                let mut map = this.lifecycle_events.lock().unwrap();
+                map.entry("start".to_string())
+                    .or_insert_with(|| LifecycleEventState {
+                        patterns: Vec::new(),
+                        callbacks: Vec::new(),
+                    })
+                    .callbacks
+                    .push(callback);
                 Ok(())
             },
         );
@@ -168,6 +275,7 @@ pub struct ServerApi {
     pub stop_triggers: StopTriggerList,
     pub crash_triggers: CrashTriggerList,
     pub plugins: PluginRegistry,
+    pub lifecycle_events: LifecycleEvents,
 }
 
 impl UserData for ServerApi {
@@ -199,6 +307,7 @@ impl UserData for ServerApi {
                     triggers: this.triggers.clone(),
                     stop_triggers: this.stop_triggers.clone(),
                     crash_triggers: this.crash_triggers.clone(),
+                    lifecycle_events: this.lifecycle_events.clone(),
                 })
             },
         );
@@ -271,6 +380,7 @@ pub fn reload_plugins(
     stop_triggers: &StopTriggerList,
     crash_triggers: &CrashTriggerList,
     plugins: &PluginRegistry,
+    lifecycle_events: &LifecycleEvents,
 ) -> mlua::Result<()> {
     println!("[MCRW] Reloading plugins...");
 
@@ -278,6 +388,13 @@ pub fn reload_plugins(
     stop_triggers.lock().unwrap().clear();
     crash_triggers.lock().unwrap().clear();
     plugins.lock().unwrap().clear();
+
+    {
+        let new_map =
+            compile_trigger_config(load_trigger_config(Path::new("trigger_config.toml")));
+        let mut guard = lifecycle_events.lock().unwrap();
+        *guard = new_map;
+    }
 
     let loaded: Table = lua.globals().get::<Table>("package")?.get("loaded")?;
     let keys_to_clear: Vec<String> = loaded

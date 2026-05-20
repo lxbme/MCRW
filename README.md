@@ -142,6 +142,43 @@ if config.enable_hello then
 end
 ```
 
+### Lifecycle Triggers
+
+Plugins can also subscribe to wrapper-managed lifecycle events whose stdout matchers are configurable. Currently exposed:
+
+| Event   | Fires when                                              | Default pattern               |
+|---------|---------------------------------------------------------|-------------------------------|
+| `start` | The Minecraft server prints its "ready" line on stdout. | `Done \([0-9.]+s\)! For help` |
+
+```lua
+wrapper:register_start(function(line)
+    wrapper:log("Server ready: " .. line)
+    return { "say §aPlugins online." }
+end)
+```
+
+The callback receives the matched line as its only argument and may return a list of commands to forward to the server (same convention as `wrapper:register`).
+
+#### `server/trigger_config.toml` (optional)
+
+Default patterns are baked into the wrapper. To override them per server, drop a `trigger_config.toml` next to your `server.jar`:
+
+```toml
+# Each top-level key is an event name. Each entry is one pattern.
+[[start]]
+text = 'Done \([0-9.]+s\)! For help'
+once = true                # fire at most once per wrapper run
+
+# Different "ready" line on a modded server? Override:
+# [[start]]
+# text = 'Modded server ready'
+# once = true
+```
+
+The file is optional. If absent — or if a particular event key is missing — the wrapper falls back to its built-in defaults. **User configuration replaces the built-in entry for that event in full** (not merged per-pattern), so if you list any `[[start]]` block you must include every variant you want.
+
+`!reload` re-reads `trigger_config.toml`, so editing the file and running `!reload` in the wrapper terminal applies the new patterns immediately.
+
 Find more examples: https://github.com/lxbme/mcrw_lua_plugins
 
 > **Note on `!reload`:** Plugin module-level state (e.g. tables declared `local` at the top of `init.lua`) is **lost** when an operator runs `!reload` at the wrapper terminal. Persist anything you need to keep across reloads via `wrapper:load_config(...)` or another on-disk store.

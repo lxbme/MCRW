@@ -20,7 +20,8 @@ use tokio::{
 };
 
 use crate::lua_ctx::{
-    self, ControlMsg, CrashTriggerList, PluginRegistry, StopTriggerList, TriggerList,
+    self, ControlMsg, CrashTriggerList, LifecycleEvents, PluginRegistry, StopTriggerList,
+    TriggerList,
 };
 
 pub fn spawn_cmd_sender(mut rx: mpsc::Receiver<String>, mut mc_stdin: tokio::process::ChildStdin) {
@@ -73,6 +74,7 @@ pub async fn run_main_loop(
     stop_triggers: StopTriggerList,
     crash_triggers: CrashTriggerList,
     plugins: PluginRegistry,
+    lifecycle_events: LifecycleEvents,
     mut ctl_rx: mpsc::Receiver<ControlMsg>,
     lua: &Lua,
 ) {
@@ -125,6 +127,41 @@ pub async fn run_main_loop(
                     }
                 } // lock gard release here
 
+                // lifecycle event dispatch (e.g. `start`)
+                {
+                    let mut events = lifecycle_events
+                        .lock()
+                        .expect("[MCRW] [PANIC] Fail to lock lifecycle_events");
+                    for (_name, state) in events.iter_mut() {
+                        let mut should_fire = false;
+                        for p in state.patterns.iter_mut() {
+                            if p.fired {
+                                continue;
+                            }
+                            if p.regex.is_match(&line) {
+                                if p.once {
+                                    p.fired = true;
+                                }
+                                should_fire = true;
+                            }
+                        }
+                        if should_fire {
+                            for cb_key in state.callbacks.iter() {
+                                let func: Function = lua.registry_value(cb_key).unwrap();
+                                let arg = Value::String(lua.create_string(&line).unwrap());
+                                match func.call::<Option<Vec<String>>>(arg) {
+                                    Ok(Some(cmds)) => commands_to_exec.extend(cmds),
+                                    Ok(None) => {}
+                                    Err(e) => eprintln!(
+                                        "[MCRW] [ERROR] lifecycle callback failed: {}",
+                                        e
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+
                 for cmd in commands_to_exec {
                     match tx_main.send(format!("{}\n", cmd)).await {
                         Ok(_) => println!("[MCRW -> Server]: {}", cmd),
@@ -136,7 +173,12 @@ pub async fn run_main_loop(
                 match ctl {
                     Some(ControlMsg::Reload) => {
                         if let Err(e) = lua_ctx::reload_plugins(
-                            lua, &triggers, &stop_triggers, &crash_triggers, &plugins,
+                            lua,
+                            &triggers,
+                            &stop_triggers,
+                            &crash_triggers,
+                            &plugins,
+                            &lifecycle_events,
                         ) {
                             eprintln!("[MCRW] [ERROR] reload failed: {}", e);
                         }
