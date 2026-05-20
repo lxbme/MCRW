@@ -61,7 +61,7 @@ Once running, the wrapper will start the Minecraft server as a child process. Yo
 
 ## Plugin Development
 
-Plugins are located in the `lua_plugins/` directory. Each plugin must have an `init.lua` entry point.
+Plugins are located in the `lua_plugins/` directory. Each plugin must have an `init.lua` entry point and a `meta.toml` describing the plugin.
 
 Example structure:
 
@@ -69,8 +69,32 @@ Example structure:
 lua_plugins/
   my_plugin/
     init.lua
+    meta.toml
     utils.lua
     config.json
+```
+
+### Plugin Metadata (`meta.toml`)
+
+Every plugin directory must contain a `meta.toml`. Plugins without one (or with an unparseable one) are skipped at load time.
+
+```toml
+name = "my_plugin"          # required: display name (may differ from dir name)
+version = "0.1.0"           # required: free-form version string
+description = "..."         # optional
+authors = ["alice", "bob"]  # optional
+dependencies = []           # optional: other plugin names this plugin depends on
+mcrw_version = ">=0.1.0"    # optional: minimum wrapper version
+```
+
+`dependencies` and `mcrw_version` are loaded into the plugin registry but are not yet enforced — they are reserved for future use (load ordering, compatibility checks).
+
+The metadata is exposed to Lua via `wrapper:meta()`:
+
+```lua
+local wrapper = Server:get_context(...)
+local meta = wrapper:meta()
+wrapper:log("Loaded " .. meta.name .. " v" .. meta.version)
 ```
 
 A simple plugin example:

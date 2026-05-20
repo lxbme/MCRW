@@ -20,13 +20,14 @@ mod utils;
 
 use lua_ctx::TriggerList;
 use mlua::Lua;
+use std::collections::HashMap;
 use std::env;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::lua_ctx::{CrashTriggerList, ServerApi, StopTriggerList};
+use crate::lua_ctx::{CrashTriggerList, PluginRegistry, ServerApi, StopTriggerList};
 
 #[tokio::main]
 async fn main() {
@@ -39,17 +40,26 @@ async fn main() {
     let triggers: TriggerList = Arc::new(Mutex::new(Vec::new()));
     let stop_triggers: StopTriggerList = Arc::new(Mutex::new(Vec::new()));
     let crash_triggers: CrashTriggerList = Arc::new(Mutex::new(Vec::new()));
+    let plugins: PluginRegistry = Arc::new(Mutex::new(HashMap::new()));
     let server_api = ServerApi {
         triggers: triggers.clone(),
         stop_triggers: stop_triggers.clone(),
         crash_triggers: crash_triggers.clone(),
+        plugins: plugins.clone(),
     };
     lua.globals()
         .set("Server", server_api)
         .expect("[MCRW] [PANIC] Fail to attach Server to lua");
 
     // load plugins
-    lua_ctx::load_plugins(&lua).expect("[MCRW] [PANIC] Fail to load plugins");
+    lua_ctx::load_plugins(&lua, &plugins).expect("[MCRW] [PANIC] Fail to load plugins");
+    {
+        let plugins_guard = plugins.lock().unwrap();
+        println!("[MCRW] Loaded {} plugins:", plugins_guard.len());
+        for (dirname, meta) in plugins_guard.iter() {
+            println!("  - {} v{} (dir: {})", meta.name, meta.version, dirname);
+        }
+    }
     println!(
         "[MCRW] Lua script loaded. Registered {} regex triggers, {} stop functions, {} crash functions.",
         triggers.lock().unwrap().len(),
