@@ -755,32 +755,50 @@ constraints on the order in which subsequent callbacks fire.
 
 ### 9.2. Ordering Guarantees
 
+For each line of server stdout, the wrapper takes a snapshot of all
+matching regex callbacks and lifecycle callbacks under their respective
+locks, and then hands the entire dispatch off to a freshly spawned
+Tokio task. The main read loop returns immediately to the `select!` and
+keeps parsing further stdout lines (and accepting `!reload`) regardless
+of how long that dispatch task takes.
+
 The wrapper enforces the following ordering properties:
 
-1. **Per-line order.** For a single line of server stdout, all matching
-   regex callbacks fire in **registration order**, and `await` to
-   completion before the next line's callbacks begin.
+1. **Per-line order.** Within the dispatch task for a single line, all
+   matching regex callbacks fire in **registration order** and each one
+   `await`s to completion before the next callback for that same line
+   begins.
 
-2. **Lifecycle after triggers.** For a single line, regex triggers are
-   processed before lifecycle (`register_start`) callbacks for that same
-   line.
+2. **Lifecycle after triggers.** Within a single line's dispatch task,
+   regex triggers are processed before lifecycle (`register_start`)
+   callbacks for that same line.
 
-3. **Command order preserved.** Commands returned by a callback are
-   forwarded to the server in the order they appear in the returned
-   table, and across multiple callbacks for the same line in the
-   sequence those callbacks produced them.
+3. **Intra-line command order preserved.** Commands returned by a
+   callback are forwarded to the server in the order they appear in
+   the returned table, and across multiple callbacks for the **same**
+   line in the sequence those callbacks produced them.
 
 The wrapper does **not** guarantee:
 
 * That callbacks for **different** server lines run sequentially with
-  respect to each other. They do today, but this is an artifact of the
-  current single-task dispatch loop and may change.
+  respect to each other. Each line gets its own spawned task; if line
+  *N*'s task is still awaiting (e.g., a long `wrapper:run_python`),
+  line *N+1*'s dispatch task can start, run, and even send its commands
+  to the server first.
+* That commands produced by line *N*'s callback reach the server
+  before commands produced by line *N+1*'s callback. Each task sends
+  its accumulated commands into a single MPSC channel in FIFO order
+  among itself, but commands from concurrently-running tasks can
+  interleave at the channel.
 * Real-time wall-clock guarantees on dispatch latency.
 
-Plugin authors SHOULD NOT rely on a callback for line *N+1* observing the
-effects of a callback for line *N* unless they explicitly synchronize
-via shared state or via wrapper commands that the server itself
-serializes.
+Plugin authors SHOULD NOT rely on a callback for line *N+1* observing
+the effects of a callback for line *N* unless they explicitly
+synchronize via shared state or via wrapper commands that the server
+itself serializes. When strict ordering across lines matters, perform
+all required work for that line inside a single callback (or chain
+synchronously inside one callback's Lua code) so that it executes
+inside one dispatch task.
 
 ### 9.3. Command Forwarding
 

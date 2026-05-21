@@ -100,12 +100,13 @@ pub async fn run_main_loop(
                 };
                 println!("[MC] {}", line);
 
-                let mut commands_to_exec: Vec<String> = Vec::new();
-
-                // --- trigger dispatch ---------------------------------------------------
-                // Snapshot matching (Function, args) tuples under the lock, then await
-                // each callback with the lock released. mlua's `Function` is Send+Clone
-                // under the `send` feature, so it can cross the await boundary safely.
+                // Snapshot matching (Function, args) tuples + lifecycle callbacks under
+                // their locks, then hand the whole dispatch off to a spawned task. This
+                // lets the main loop return immediately to the `select!` so subsequent
+                // stdout lines and `!reload` keep getting parsed while a slow callback
+                // (e.g. one waiting on a Python subprocess) is in flight. Callbacks for
+                // the SAME line still run sequentially in registration order inside the
+                // task; only DIFFERENT lines' dispatches run concurrently.
                 let pending: Vec<(Function, Vec<String>)> = {
                     let g = match triggers.lock() {
                         Ok(g) => g,
@@ -130,20 +131,7 @@ pub async fn run_main_loop(
                     }
                     v
                 };
-                for (f, args) in pending {
-                    match f
-                        .call_async::<Option<Vec<String>>>(Variadic::from_iter(args))
-                        .await
-                    {
-                        Ok(Some(cmds)) => commands_to_exec.extend(cmds),
-                        Ok(None) => {}
-                        Err(e) => eprintln!("[MCRW] [ERROR] trigger callback failed: {e}"),
-                    }
-                }
 
-                // --- lifecycle dispatch (e.g. `start`) ----------------------------------
-                // Update `fired` flags and collect callbacks under the lock, then await
-                // outside it.
                 let lifecycle_pending: Vec<Function> = {
                     let mut events = match lifecycle_events.lock() {
                         Ok(g) => g,
@@ -179,19 +167,43 @@ pub async fn run_main_loop(
                     }
                     funcs
                 };
-                for f in lifecycle_pending {
-                    match f.call_async::<Option<Vec<String>>>(line.clone()).await {
-                        Ok(Some(cmds)) => commands_to_exec.extend(cmds),
-                        Ok(None) => {}
-                        Err(e) => eprintln!("[MCRW] [ERROR] lifecycle callback failed: {e}"),
-                    }
-                }
 
-                for cmd in commands_to_exec {
-                    match tx_main.send(format!("{}\n", cmd)).await {
-                        Ok(_) => println!("[MCRW -> Server]: {}", cmd),
-                        Err(_) => println!("[MCRW] Fail to send cmd: {}", cmd),
-                    };
+                if !pending.is_empty() || !lifecycle_pending.is_empty() {
+                    let tx_line = tx_main.clone();
+                    let line_for_lc = line;
+                    tokio::spawn(async move {
+                        let mut commands_to_exec: Vec<String> = Vec::new();
+                        for (f, args) in pending {
+                            match f
+                                .call_async::<Option<Vec<String>>>(Variadic::from_iter(args))
+                                .await
+                            {
+                                Ok(Some(cmds)) => commands_to_exec.extend(cmds),
+                                Ok(None) => {}
+                                Err(e) => {
+                                    eprintln!("[MCRW] [ERROR] trigger callback failed: {e}")
+                                }
+                            }
+                        }
+                        for f in lifecycle_pending {
+                            match f
+                                .call_async::<Option<Vec<String>>>(line_for_lc.clone())
+                                .await
+                            {
+                                Ok(Some(cmds)) => commands_to_exec.extend(cmds),
+                                Ok(None) => {}
+                                Err(e) => {
+                                    eprintln!("[MCRW] [ERROR] lifecycle callback failed: {e}")
+                                }
+                            }
+                        }
+                        for cmd in commands_to_exec {
+                            match tx_line.send(format!("{}\n", cmd)).await {
+                                Ok(_) => println!("[MCRW -> Server]: {}", cmd),
+                                Err(_) => println!("[MCRW] Fail to send cmd: {}", cmd),
+                            };
+                        }
+                    });
                 }
             }
             ctl = ctl_rx.recv() => {
