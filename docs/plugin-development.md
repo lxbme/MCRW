@@ -2,7 +2,7 @@
 
 | Applies To | Status                                                       | Updated    |
 |------------|--------------------------------------------------------------|------------|
-| MCRW ≥ 0.1.0 | Stable, except `wrapper:run_python` which is **Experimental** | 2026-05-21 |
+| MCRW ≥ 0.2.0 | Stable, except `wrapper:run_python` which is **Experimental** | 2026-05-21 |
 
 This document is the reference for authors of plugins targeting the Minecraft
 Rust Wrapper (MCRW, crate name `mcrstw`). It describes the on-disk plugin
@@ -146,11 +146,11 @@ Unknown keys are tolerated and silently ignored.
 
 ```toml
 name        = "essential"
-version     = "0.1.0"
+version     = "0.2.0"
 description = "Essential in-chat commands: !tp, !gm, !day, !night, !timeset, !debugstick, !help"
 authors     = ["alice", "bob@example.com"]
 dependencies = []
-mcrw_version = ">=0.1.0"
+mcrw_version = ">=0.2.0"
 ```
 
 > **Note.** The `dependencies` and `mcrw_version` fields are reserved for
@@ -910,11 +910,11 @@ world directory via a Python script.
 
 ```toml
 name        = "archiver"
-version     = "0.1.0"
+version     = "0.2.0"
 description = "Take an on-demand tarball snapshot of the world directory."
 authors     = ["lxbme"]
 dependencies = []
-mcrw_version = ">=0.1.0"
+mcrw_version = ">=0.2.0"
 ```
 
 **`lua_plugins/archiver/init.lua`**

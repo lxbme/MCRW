@@ -109,11 +109,11 @@ Every plugin directory must contain a `meta.toml`. Plugins without one (or with 
 
 ```toml
 name = "my_plugin"          # required: display name (may differ from dir name)
-version = "0.1.0"           # required: free-form version string
+version = "0.2.0"           # required: free-form version string
 description = "..."         # optional
 authors = ["alice", "bob"]  # optional
 dependencies = []           # optional: other plugin names this plugin depends on
-mcrw_version = ">=0.1.0"    # optional: minimum wrapper version
+mcrw_version = ">=0.2.0"    # optional: minimum wrapper version
 ```
 
 `dependencies` and `mcrw_version` are loaded into the plugin registry but are not yet enforced — they are reserved for future use (load ordering, compatibility checks).
