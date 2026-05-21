@@ -47,10 +47,24 @@ pub struct CrashTrigger {
     pub callback: RegistryKey,
 }
 
+pub struct CronJob {
+    pub schedule: cron::Schedule,
+    pub expr: String,
+    pub callback: RegistryKey,
+    pub plugin: String,
+    // Cached next fire time. Advanced via `schedule.after(&fire).next()`
+    // each time the job dispatches, so the driver's cutoff check
+    // compares against a stored value instead of re-deriving via the
+    // strict-`>` `Schedule::upcoming` iterator (which would always skip
+    // the tick we just slept until).
+    pub next_fire: Option<chrono::DateTime<chrono::Local>>,
+}
+
 // global list of lua plugins callback
 pub type TriggerList = Arc<Mutex<Vec<Trigger>>>;
 pub type StopTriggerList = Arc<Mutex<Vec<StopTrigger>>>;
 pub type CrashTriggerList = Arc<Mutex<Vec<CrashTrigger>>>;
+pub type CronJobList = Arc<Mutex<Vec<CronJob>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMeta {
@@ -241,6 +255,7 @@ pub struct PluginApi {
     children: ChildTracker,
     next_child_id: ChildIdCounter,
     cmd_tx: mpsc::Sender<String>,
+    cron_jobs: CronJobList,
 }
 
 impl UserData for PluginApi {
@@ -254,6 +269,32 @@ impl UserData for PluginApi {
                     .lock()
                     .unwrap()
                     .push(Trigger { regex, callback });
+                Ok(())
+            },
+        );
+
+        methods.add_method(
+            "register_cron",
+            |lua: &Lua, this: &Self, (expr, func): (String, Function)| {
+                let schedule = expr.parse::<cron::Schedule>().map_err(|e| {
+                    mlua::Error::external(format!(
+                        "wrapper:register_cron: invalid cron expression '{expr}': {e}"
+                    ))
+                })?;
+                let first_fire = schedule.upcoming(chrono::Local).next();
+                if first_fire.is_none() {
+                    return Err(mlua::Error::external(format!(
+                        "wrapper:register_cron: cron expression '{expr}' has no future fire times"
+                    )));
+                }
+                let callback = lua.create_registry_value(func)?;
+                this.cron_jobs.lock().unwrap().push(CronJob {
+                    schedule,
+                    expr,
+                    callback,
+                    plugin: this.dirname.clone(),
+                    next_fire: first_fire,
+                });
                 Ok(())
             },
         );
@@ -579,6 +620,7 @@ pub struct ServerApi {
     pub children: ChildTracker,
     pub next_child_id: ChildIdCounter,
     pub cmd_tx: mpsc::Sender<String>,
+    pub cron_jobs: CronJobList,
 }
 
 impl UserData for ServerApi {
@@ -615,6 +657,7 @@ impl UserData for ServerApi {
                     children: this.children.clone(),
                     next_child_id: this.next_child_id.clone(),
                     cmd_tx: this.cmd_tx.clone(),
+                    cron_jobs: this.cron_jobs.clone(),
                 })
             },
         );
@@ -681,6 +724,58 @@ pub fn load_plugins(lua: &Lua, registry: &PluginRegistry) -> mlua::Result<()> {
     Ok(())
 }
 
+// Earliest cached fire time across all registered cron jobs, in
+// `chrono::Local`. Returns None if no cron jobs are registered or every
+// remaining job has exhausted its schedule. The caller should park on
+// `std::future::pending()` in that case rather than busy-polling.
+pub fn next_cron_fire(jobs: &CronJobList) -> Option<chrono::DateTime<chrono::Local>> {
+    let g = jobs.lock().ok()?;
+    g.iter().filter_map(|j| j.next_fire).min()
+}
+
+// Snapshots every cron job whose cached `next_fire` is at or before `now`
+// (+100ms tolerance for early wakeups). For each match, advances the
+// job's `next_fire` via `schedule.after(&fire).next()` *before* dispatch
+// so an errored callback or registry lookup does not cause the same
+// tick to re-fire on the next driver wake. Recovers each callback
+// Function under the same lock so the caller can drop the guard and
+// dispatch on tokio tasks.
+pub fn drain_due_cron_jobs(
+    lua: &Lua,
+    jobs: &CronJobList,
+    now: chrono::DateTime<chrono::Local>,
+) -> Vec<(Function, String, String, String)> {
+    let mut g = match jobs.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("[MCRW] [ERROR] cron_jobs lock poisoned: {e}");
+            return Vec::new();
+        }
+    };
+    let cutoff = now + chrono::Duration::milliseconds(100);
+    let mut due = Vec::new();
+    for job in g.iter_mut() {
+        let Some(fire) = job.next_fire else { continue };
+        if fire > cutoff {
+            continue;
+        }
+        job.next_fire = job.schedule.after(&fire).next();
+        match lua.registry_value::<Function>(&job.callback) {
+            Ok(f) => due.push((
+                f,
+                fire.to_rfc3339(),
+                job.plugin.clone(),
+                job.expr.clone(),
+            )),
+            Err(e) => eprintln!(
+                "[MCRW] [ERROR] cron registry lookup ({} / {}): {e}",
+                job.plugin, job.expr
+            ),
+        }
+    }
+    due
+}
+
 pub fn reload_plugins(
     lua: &Lua,
     triggers: &TriggerList,
@@ -689,6 +784,7 @@ pub fn reload_plugins(
     plugins: &PluginRegistry,
     lifecycle_events: &LifecycleEvents,
     children: &ChildTracker,
+    cron_jobs: &CronJobList,
 ) -> mlua::Result<()> {
     println!("[MCRW] Reloading plugins...");
 
@@ -707,6 +803,7 @@ pub fn reload_plugins(
     triggers.lock().unwrap().clear();
     stop_triggers.lock().unwrap().clear();
     crash_triggers.lock().unwrap().clear();
+    cron_jobs.lock().unwrap().clear();
     plugins.lock().unwrap().clear();
 
     {

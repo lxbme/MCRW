@@ -223,6 +223,7 @@ signatures and behaviors are documented inline in the sections referenced.
 | Method                                                  | Section | Purpose                                                  |
 |---------------------------------------------------------|---------|----------------------------------------------------------|
 | `wrapper:register(pattern, callback)`                   | [§4.1](#41-stdout-regex-triggers) | Register a regex on server stdout.                       |
+| `wrapper:register_cron(expr, callback)`                 | [§4.6](#46-cron-scheduled-callbacks) | Fire callback on a cron schedule (local time).           |
 | `wrapper:register_start(callback)`                      | [§4.2](#42-lifecycle-events) | Subscribe to the `start` lifecycle event.                |
 | `wrapper:register_on_stop(callback)`                    | [§4.2](#42-lifecycle-events) | Run a callback on graceful server shutdown.              |
 | `wrapper:register_on_crash(callback)`                   | [§4.2](#42-lifecycle-events) | Run a callback on abnormal server exit.                  |
@@ -436,6 +437,106 @@ intercepts a small set of built-in commands and handles them itself:
 Built-in commands are **not** forwarded to the server. There is no
 in-game equivalent of any wrapper command — they are deliberately
 operator-only. A plugin cannot block, intercept, or augment these.
+
+### 4.6. Cron-Scheduled Callbacks
+
+```
+wrapper:register_cron(expr: string, callback: function(fire_time): table?)
+```
+
+Registers a callback that fires on a cron schedule. Use this for periodic
+or time-of-day work that does not correspond to any server output line —
+e.g. nightly backups, hourly broadcasts, end-of-month report rolls.
+
+**Cron syntax.** `expr` is parsed by the Rust [`cron`](https://docs.rs/cron)
+crate. It uses **six space-separated fields** (POSIX cron plus a leading
+seconds field):
+
+```
+sec min hour day-of-month month day-of-week
+```
+
+Each field accepts the usual `*`, `,`, `-`, `/`, and named-value tokens.
+Convenience aliases `@yearly`, `@monthly`, `@weekly`, `@daily`, `@hourly`
+are also accepted as full expressions.
+
+Examples:
+
+| Expression                  | Meaning                              |
+|-----------------------------|--------------------------------------|
+| `"0 * * * * *"`             | Every minute, on second 0            |
+| `"*/30 * * * * *"`          | Every 30 seconds                     |
+| `"0 */5 * * * *"`           | Every 5 minutes                      |
+| `"0 0 3 * * *"`             | Every day at 03:00:00                |
+| `"0 0 3 * * Mon"`           | Every Monday at 03:00:00             |
+| `"@hourly"`                 | Top of every hour                    |
+| `"@daily"`                  | Midnight every day                   |
+
+**Timezone.** All schedules are evaluated in the **wrapper process's
+local timezone** (`chrono::Local`). `"0 0 3 * * *"` means 03:00:00 on
+the wall clock of the machine running the wrapper, including DST.
+
+**Callback signature.** When the schedule fires, `callback(fire_time)` is
+invoked. `fire_time` is the scheduled fire moment as an ISO 8601 string
+with offset, e.g. `"2026-05-21T03:00:00+08:00"`. The callback MAY return:
+
+* `nil` (no commands to forward).
+* A Lua table of strings; each element is forwarded to the server as one
+  command, exactly as in [§4.4](#44-returning-commands).
+
+**Example:**
+
+```lua
+-- nightly save + announcement at 03:00 server-local.
+wrapper:register_cron("0 0 3 * * *", function(fire_time)
+    wrapper:log("nightly maintenance at " .. fire_time)
+    return {
+        "save-all",
+        "say nightly save complete",
+    }
+end)
+
+-- every 5 minutes, push an MOTD-style tip via active-push.
+local tips = { "Stay safe!", "Don't dig straight down.", "Sleep restores hearts." }
+local i = 1
+wrapper:register_cron("0 */5 * * * *", function(_fire_time)
+    wrapper:command("say [TIP] " .. tips[i])
+    i = (i % #tips) + 1
+end)
+```
+
+**Registration errors.** Invalid cron strings raise a Lua error at
+registration time — the plugin will fail to load if `init.lua` registers
+an unparseable expression. Expressions that parse but have no future fire
+times (e.g. `"0 0 0 30 2 *"`, Feb 30) are also rejected at registration.
+
+**Multiple plugins.** Multiple plugins MAY register against overlapping
+schedules; all due callbacks fire on the same tick, in registration order
+inside a single spawned task per tick.
+
+**Overrun.** If a callback's previous run is still in progress when its
+next fire arrives, the new fire spawns its own task and the two runs
+proceed concurrently. This matches the dispatch semantics of
+`wrapper:register`. If a job must not overlap with itself, gate it with a
+plain Lua boolean inside the callback:
+
+```lua
+local running = false
+wrapper:register_cron("0 */5 * * * *", function(t)
+    if running then return end
+    running = true
+    -- ... slow work ...
+    running = false
+end)
+```
+
+**Reload behavior.** All cron jobs are cleared by `!reload` and
+re-registered when each plugin's `init.lua` runs again.
+
+**Resolution and accuracy.** The driver wakes at most every 300 seconds
+even with no jobs to fire (a defensive cap against wall-clock steps and
+DST edges). Within that envelope, fire times are precise to ~100 ms.
+Schedules requiring sub-second precision are not supported.
 
 ---
 
@@ -1074,6 +1175,25 @@ Register a regex trigger on server standard output.
 **Errors.** A Lua error is raised at registration time if `pattern` does
 not compile. Callback runtime errors are caught and logged; they do not
 abort other callbacks.
+
+### `wrapper:register_cron(expr, callback)`
+
+Register a cron-scheduled callback. See
+[§4.6](#46-cron-scheduled-callbacks).
+
+* `expr` (string, required) — Six-field cron expression
+  (`sec min hour dom mon dow`) or an `@hourly`/`@daily`-style alias.
+  Parsed by the [`cron`](https://docs.rs/cron) crate. Schedules are
+  evaluated in the wrapper's local timezone.
+* `callback` (function, required) — Invoked with one argument: an ISO
+  8601 local-time string for the scheduled fire moment
+  (e.g. `"2026-05-21T03:00:00+08:00"`). May return `nil` or
+  `table<string>`.
+
+**Errors.** A Lua error is raised at registration time if `expr` does
+not parse, or if it parses but has no future fire times. Callback
+runtime errors are caught and logged; concurrent fires of the same job
+are NOT serialized (gate with a Lua local if needed).
 
 ### `wrapper:register_start(callback)`
 

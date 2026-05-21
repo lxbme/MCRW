@@ -20,7 +20,7 @@ use tokio::{
 };
 
 use crate::lua_ctx::{
-    self, ChildTracker, ControlMsg, CrashTriggerList, LifecycleEvents, PluginRegistry,
+    self, ChildTracker, ControlMsg, CrashTriggerList, CronJobList, LifecycleEvents, PluginRegistry,
     StopTriggerList, TriggerList,
 };
 
@@ -81,6 +81,7 @@ pub async fn run_main_loop(
     plugins: PluginRegistry,
     lifecycle_events: LifecycleEvents,
     children: ChildTracker,
+    cron_jobs: CronJobList,
     mut ctl_rx: mpsc::Receiver<ControlMsg>,
     lua: &Lua,
 ) {
@@ -217,11 +218,55 @@ pub async fn run_main_loop(
                             &plugins,
                             &lifecycle_events,
                             &children,
+                            &cron_jobs,
                         ) {
                             eprintln!("[MCRW] [ERROR] reload failed: {}", e);
                         }
                     }
                     None => {}
+                }
+            }
+            // Cron arm. The future computes the next-fire deadline and sleeps
+            // until then; with no jobs registered it parks on pending(), so
+            // the arm contributes no wake-ups. Capped at 300s per sleep so a
+            // wall-clock step / DST edge can't strand a long sleeper past
+            // its fire moment — we re-derive the deadline each wake anyway.
+            _ = async {
+                match lua_ctx::next_cron_fire(&cron_jobs) {
+                    Some(fire) => {
+                        let dur = (fire - chrono::Local::now())
+                            .to_std()
+                            .unwrap_or(std::time::Duration::ZERO);
+                        let dur = dur.min(std::time::Duration::from_secs(300));
+                        tokio::time::sleep(dur).await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let due = lua_ctx::drain_due_cron_jobs(lua, &cron_jobs, chrono::Local::now());
+                if !due.is_empty() {
+                    let tx_line = tx_main.clone();
+                    tokio::spawn(async move {
+                        let mut commands_to_exec: Vec<String> = Vec::new();
+                        for (f, fire_time, plugin, expr) in due {
+                            match f
+                                .call_async::<Option<Vec<String>>>(fire_time)
+                                .await
+                            {
+                                Ok(Some(cmds)) => commands_to_exec.extend(cmds),
+                                Ok(None) => {}
+                                Err(e) => eprintln!(
+                                    "[MCRW] [ERROR] cron callback failed ({plugin} / {expr}): {e}"
+                                ),
+                            }
+                        }
+                        for cmd in commands_to_exec {
+                            match tx_line.send(format!("{}\n", cmd)).await {
+                                Ok(_) => println!("[MCRW -> Server]: {}", cmd),
+                                Err(_) => println!("[MCRW] Fail to send cmd: {}", cmd),
+                            };
+                        }
+                    });
                 }
             }
         }

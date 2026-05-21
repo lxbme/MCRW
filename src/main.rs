@@ -30,8 +30,8 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::lua_ctx::{
-    ChildIdCounter, ChildTracker, ControlMsg, CrashTriggerList, LifecycleEvents, PluginRegistry,
-    ServerApi, StopTriggerList,
+    ChildIdCounter, ChildTracker, ControlMsg, CrashTriggerList, CronJobList, LifecycleEvents,
+    PluginRegistry, ServerApi, StopTriggerList,
 };
 
 #[tokio::main]
@@ -53,6 +53,7 @@ async fn main() {
     let mcrw_config = lua_ctx::load_mcrw_config(Path::new("mcrw.toml"));
     let children: ChildTracker = Arc::new(Mutex::new(HashMap::new()));
     let next_child_id: ChildIdCounter = Arc::new(AtomicU64::new(1));
+    let cron_jobs: CronJobList = Arc::new(Mutex::new(Vec::new()));
 
     // init game command channel — created here (ahead of ServerApi) so the
     // sender can be cloned into ServerApi for the new wrapper:command API.
@@ -68,6 +69,7 @@ async fn main() {
         children: children.clone(),
         next_child_id: next_child_id.clone(),
         cmd_tx: tx.clone(),
+        cron_jobs: cron_jobs.clone(),
     };
     lua.globals()
         .set("Server", server_api)
@@ -124,6 +126,7 @@ async fn main() {
         plugins.clone(),
         lifecycle_events.clone(),
         children.clone(),
+        cron_jobs.clone(),
         ctl_rx,
         &lua,
     )
