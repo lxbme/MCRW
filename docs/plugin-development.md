@@ -229,6 +229,7 @@ signatures and behaviors are documented inline in the sections referenced.
 | `wrapper:log(msg)`                                      | [§6](#6-logging) | Print `[<plugin_name>] <msg>` to the wrapper console.    |
 | `wrapper:meta()`                                        | [§3](#3-the-wrapper-handle)  | Return the plugin's parsed `meta.toml` as a Lua table.   |
 | `wrapper:load_config(default)`                          | [§5.1](#51-per-plugin-configjson) | Load (or initialize) the plugin's `config.json`.         |
+| `wrapper:command(cmd)`                                  | [§4.4](#44-returning-commands) | **Async.** Push one command to the server queue immediately. |
 | `wrapper:run_python(script, args, opts)`                | [§8](#8-python-scripts-escape-hatch) | **Async.** Execute a Python script inside the plugin directory. |
 
 Method calls execute synchronously from Lua's point of view. `run_python`
@@ -380,6 +381,47 @@ This sanitization is the defense of last resort against multi-line strings
 (e.g., Lua error messages with embedded stack traces) accidentally being
 interpreted as multiple commands by the server. Plugins SHOULD nevertheless
 avoid relying on it: format commands clean to begin with.
+
+#### `wrapper:command(cmd)` — Active Push
+
+```
+wrapper:command(cmd: string)
+```
+
+Pushes a single command into the same outgoing queue **immediately**,
+without waiting for the current callback to return. The sanitization
+described above applies identically. Use this when you need to emit
+commands from code paths **outside** the callback's return value, for
+example:
+
+* After `wrapper:run_python` returns, when the result of the script
+  determines what to say in-game.
+* Inside a `pcall`-protected branch where you may also want to keep the
+  return-value channel for the success path.
+* To drip-feed commands without buffering them in a Lua sequence first.
+
+`wrapper:command` is asynchronous (it yields the calling Lua coroutine).
+It blocks (yields) when the channel is full — same backpressure as
+returning commands from a callback — and resolves when a slot frees.
+Returns nothing on success.
+
+**Errors.** Raises a Lua error if the queue has been closed; this only
+happens during wrapper shutdown. Use `pcall` if you need to continue
+past that case.
+
+**Ordering caveat.** Commands pushed via `wrapper:command` interleave at
+the shared queue with commands returned by other callbacks. There is no
+global ordering guarantee across plugins or across log lines (see
+[§9.2](#92-ordering-guarantees)). Within one callback, commands pushed
+in source order arrive in the channel in that same order; mixing
+`wrapper:command` calls with the callback's return-value list, however,
+is undefined relative to each other — pick one mechanism per callback
+if intra-callback ordering matters.
+
+For commands you compute synchronously inside a trigger callback,
+returning them in the callback's table is still preferred: it batches
+them into one channel exchange and naturally preserves intra-line
+ordering relative to other callbacks for the same line.
 
 ### 4.5. Built-in Wrapper Commands
 
@@ -1077,6 +1119,18 @@ Load (or initialize) the plugin's `config.json`. See
 
 **Errors.** Raises if `config.json` exists but is unparseable, or if the
 file cannot be written when creating defaults.
+
+### `wrapper:command(cmd)` *(async)*
+
+Push a single command into the outgoing server queue without waiting for
+the current callback to return. See
+[§4.4](#44-returning-commands).
+
+* `cmd` (string, required) — One command. Interior `\n`/`\r` are
+  rewritten to spaces by the sender; one trailing `\n` is added.
+* **Returns:** nothing.
+
+**Errors.** Raises if the queue has been closed (wrapper shutdown).
 
 ### `wrapper:run_python(script, args, opts)` *(async)*
 

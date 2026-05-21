@@ -53,6 +53,11 @@ async fn main() {
     let mcrw_config = lua_ctx::load_mcrw_config(Path::new("mcrw.toml"));
     let children: ChildTracker = Arc::new(Mutex::new(HashMap::new()));
     let next_child_id: ChildIdCounter = Arc::new(AtomicU64::new(1));
+
+    // init game command channel — created here (ahead of ServerApi) so the
+    // sender can be cloned into ServerApi for the new wrapper:command API.
+    let (tx, rx) = mpsc::channel::<String>(max_cmd_queue);
+
     let server_api = ServerApi {
         triggers: triggers.clone(),
         stop_triggers: stop_triggers.clone(),
@@ -62,6 +67,7 @@ async fn main() {
         mcrw_config: mcrw_config.clone(),
         children: children.clone(),
         next_child_id: next_child_id.clone(),
+        cmd_tx: tx.clone(),
     };
     lua.globals()
         .set("Server", server_api)
@@ -99,8 +105,6 @@ async fn main() {
     let stdout = child.stdout.take().expect("Failed to open stdout");
     let stdin = child.stdin.take().expect("Failed to open stdin");
 
-    // init game command channel
-    let (tx, rx) = mpsc::channel::<String>(max_cmd_queue);
     // wrapper control channel (e.g. `!reload` typed at wrapper terminal)
     let (ctl_tx, ctl_rx) = mpsc::channel::<ControlMsg>(16);
 

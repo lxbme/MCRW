@@ -32,6 +32,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::process::Child;
+use tokio::sync::mpsc;
 
 pub struct Trigger {
     pub regex: Regex,
@@ -239,6 +240,7 @@ pub struct PluginApi {
     mcrw_config: Arc<McrwConfig>,
     children: ChildTracker,
     next_child_id: ChildIdCounter,
+    cmd_tx: mpsc::Sender<String>,
 }
 
 impl UserData for PluginApi {
@@ -340,6 +342,28 @@ impl UserData for PluginApi {
                 Ok(result_lua_value)
             },
         );
+
+        // Active push: queue one command to the server immediately, without waiting
+        // for the current callback to return. Yields (Lua coroutine pauses) if the
+        // 1000-slot command queue is full — same backpressure as callback-returned
+        // commands. Errors only on shutdown (receiver dropped).
+        methods.add_async_method("command", |_lua, this, cmd: String| {
+            let tx = this.cmd_tx.clone();
+            async move {
+                match tx.send(format!("{}\n", cmd)).await {
+                    Ok(_) => {
+                        println!("[MCRW -> Server]: {}", cmd);
+                        Ok(())
+                    }
+                    Err(_) => {
+                        println!("[MCRW] Fail to send cmd: {}", cmd);
+                        Err(mlua::Error::external(
+                            "wrapper:command: command queue closed (shutting down?)",
+                        ))
+                    }
+                }
+            }
+        });
 
         // Async escape-hatch: run a Python script located inside this plugin's directory.
         // Returns a table { stdout = <parsed-JSON-of-last-stdout-line>, stderr = string, code = int }.
@@ -554,6 +578,7 @@ pub struct ServerApi {
     pub mcrw_config: Arc<McrwConfig>,
     pub children: ChildTracker,
     pub next_child_id: ChildIdCounter,
+    pub cmd_tx: mpsc::Sender<String>,
 }
 
 impl UserData for ServerApi {
@@ -589,6 +614,7 @@ impl UserData for ServerApi {
                     mcrw_config: this.mcrw_config.clone(),
                     children: this.children.clone(),
                     next_child_id: this.next_child_id.clone(),
+                    cmd_tx: this.cmd_tx.clone(),
                 })
             },
         );
