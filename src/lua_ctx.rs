@@ -18,7 +18,12 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
-    sync::{Arc, Mutex},
+    process::Stdio,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use mlua::LuaSerdeExt;
@@ -26,6 +31,7 @@ use mlua::{Function, Lua, RegistryKey, Table, UserData, UserDataMethods, Value};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use tokio::process::Child;
 
 pub struct Trigger {
     pub regex: Regex,
@@ -96,6 +102,67 @@ pub struct LifecycleEventState {
 
 pub type LifecycleEvents = Arc<Mutex<HashMap<String, LifecycleEventState>>>;
 
+// ---------------------------------------------------------------------------
+// mcrw.toml — wrapper-level config (sibling to server.jar / trigger_config.toml)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PythonConfig {
+    #[serde(default = "default_python_interpreter")]
+    pub interpreter: String,
+    #[serde(default = "default_python_timeout_ms")]
+    pub default_timeout_ms: u64,
+}
+fn default_python_interpreter() -> String {
+    "python3".into()
+}
+fn default_python_timeout_ms() -> u64 {
+    30_000
+}
+impl Default for PythonConfig {
+    fn default() -> Self {
+        Self {
+            interpreter: default_python_interpreter(),
+            default_timeout_ms: default_python_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McrwConfig {
+    #[serde(default)]
+    pub python: PythonConfig,
+}
+
+pub fn load_mcrw_config(path: &Path) -> Arc<McrwConfig> {
+    match fs::read_to_string(path) {
+        Ok(s) => match toml::from_str::<McrwConfig>(&s) {
+            Ok(cfg) => {
+                println!("[MCRW] Loaded mcrw.toml");
+                Arc::new(cfg)
+            }
+            Err(e) => {
+                eprintln!("[MCRW] [ERROR] parse mcrw.toml: {} (using defaults)", e);
+                Arc::new(McrwConfig::default())
+            }
+        },
+        Err(_) => Arc::new(McrwConfig::default()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Child process tracker — one per ServerApi, shared across PluginApi clones.
+// `!reload` drains and start_kill()s every entry so no in-flight python script
+// outlives the Lua state it was spawned from.
+// ---------------------------------------------------------------------------
+
+pub type ChildTracker = Arc<Mutex<HashMap<u64, Child>>>;
+pub type ChildIdCounter = Arc<AtomicU64>;
+
+// ---------------------------------------------------------------------------
+// trigger_config.toml (unchanged)
+// ---------------------------------------------------------------------------
+
 fn builtin_trigger_config() -> TriggerConfig {
     let mut events = HashMap::new();
     events.insert(
@@ -157,7 +224,10 @@ pub fn compile_trigger_config(cfg: TriggerConfig) -> HashMap<String, LifecycleEv
         .collect()
 }
 
-// Api for lua plugins
+// ---------------------------------------------------------------------------
+// PluginApi — exposed to Lua as the per-plugin `wrapper` handle.
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct PluginApi {
     dirname: String,
@@ -166,6 +236,9 @@ pub struct PluginApi {
     stop_triggers: StopTriggerList,
     crash_triggers: CrashTriggerList,
     lifecycle_events: LifecycleEvents,
+    mcrw_config: Arc<McrwConfig>,
+    children: ChildTracker,
+    next_child_id: ChildIdCounter,
 }
 
 impl UserData for PluginApi {
@@ -267,8 +340,210 @@ impl UserData for PluginApi {
                 Ok(result_lua_value)
             },
         );
+
+        // Async escape-hatch: run a Python script located inside this plugin's directory.
+        // Returns a table { stdout = <parsed-JSON-of-last-stdout-line>, stderr = string, code = int }.
+        methods.add_async_method(
+            "run_python",
+            |lua,
+             this,
+             (script, args, opts): (String, Option<Vec<String>>, Option<Table>)| {
+                // Snapshot everything we need out of `this` synchronously so the
+                // returned future captures only owned data (and is therefore Send + 'static
+                // without depending on UserDataRef's Send-ness).
+                let dirname = this.dirname.clone();
+                let plugin_name = this.meta.name.clone();
+                let mcrw_config = this.mcrw_config.clone();
+                let children = this.children.clone();
+                let next_child_id = this.next_child_id.clone();
+                async move {
+                    run_python_impl(
+                        lua,
+                        dirname,
+                        plugin_name,
+                        mcrw_config,
+                        children,
+                        next_child_id,
+                        script,
+                        args,
+                        opts,
+                    )
+                    .await
+                }
+            },
+        );
     }
 }
+
+#[allow(clippy::too_many_arguments)]
+async fn run_python_impl(
+    lua: Lua,
+    dirname: String,
+    plugin_name: String,
+    mcrw_config: Arc<McrwConfig>,
+    children: ChildTracker,
+    next_child_id: ChildIdCounter,
+    script: String,
+    args: Option<Vec<String>>,
+    opts: Option<Table>,
+) -> mlua::Result<Table> {
+    // (a) path validation — canonicalize both ends, then enforce containment.
+    let plugin_root = fs::canonicalize(Path::new("lua_plugins").join(&dirname))
+        .map_err(|e| mlua::Error::external(format!("plugin dir invalid: {e}")))?;
+    let script_canonical = fs::canonicalize(plugin_root.join(&script))
+        .map_err(|e| mlua::Error::external(format!("script not found ({script}): {e}")))?;
+    if !script_canonical.starts_with(&plugin_root) {
+        return Err(mlua::Error::external(
+            "script path escapes plugin directory (symlink or '..')",
+        ));
+    }
+
+    // (b) opts
+    let mut stdin_data: Option<String> = None;
+    let mut timeout_ms = mcrw_config.python.default_timeout_ms;
+    let mut env_extra: Vec<(String, String)> = Vec::new();
+    if let Some(t) = opts {
+        if let Ok(Value::String(s)) = t.get::<Value>("stdin") {
+            stdin_data = Some(s.to_str()?.to_string());
+        }
+        if let Ok(Value::Integer(n)) = t.get::<Value>("timeout_ms") {
+            if n > 0 {
+                timeout_ms = n as u64;
+            }
+        }
+        if let Ok(Value::Table(env_t)) = t.get::<Value>("env") {
+            for pair in env_t.pairs::<String, String>() {
+                let (k, v) = pair?;
+                env_extra.push((k, v));
+            }
+        }
+    }
+
+    // (c) spawn
+    let mut cmd = tokio::process::Command::new(&mcrw_config.python.interpreter);
+    cmd.arg(&script_canonical)
+        .args(args.unwrap_or_default())
+        .current_dir(&plugin_root)
+        .envs(env_extra)
+        .stdin(if stdin_data.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| {
+        mlua::Error::external(format!(
+            "spawn python ({}): {e}",
+            mcrw_config.python.interpreter
+        ))
+    })?;
+
+    let task_id = next_child_id.fetch_add(1, Ordering::Relaxed);
+    let stdout_handle = child.stdout.take().expect("stdout was piped");
+    let stderr_handle = child.stderr.take().expect("stderr was piped");
+    let stdin_handle = child.stdin.take();
+    {
+        let mut g = children.lock().unwrap();
+        g.insert(task_id, child);
+    }
+
+    // (e) stdin feeder
+    if let (Some(mut s), Some(data)) = (stdin_handle, stdin_data) {
+        let bytes = data.into_bytes();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = s.write_all(&bytes).await;
+            let _ = s.shutdown().await;
+        });
+    }
+
+    // (f) stderr forwarder — print each line under [<plugin>][py] prefix and also
+    //     accumulate so we can return the full stderr to Lua.
+    let stderr_task = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut buf = String::new();
+        let mut lines = BufReader::new(stderr_handle).lines();
+        while let Ok(Some(l)) = lines.next_line().await {
+            println!("[{}][py] {}", plugin_name, l);
+            buf.push_str(&l);
+            buf.push('\n');
+        }
+        buf
+    });
+
+    // (g) stdout collector
+    let stdout_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut h = stdout_handle;
+        let _ = h.read_to_end(&mut buf).await;
+        buf
+    });
+
+    // (h) wait with timeout — take ownership of Child out of the tracker, then await.
+    let children_for_wait = children.clone();
+    let wait_fut = async move {
+        let child_opt = {
+            let mut g = children_for_wait.lock().unwrap();
+            g.remove(&task_id)
+        };
+        match child_opt {
+            Some(mut c) => c
+                .wait()
+                .await
+                .map_err(|e| mlua::Error::external(format!("wait python: {e}"))),
+            None => Err(mlua::Error::external("child was killed by reload")),
+        }
+    };
+    let status = match tokio::time::timeout(Duration::from_millis(timeout_ms), wait_fut).await {
+        Ok(r) => r?,
+        Err(_) => {
+            // timeout: if it's still in the tracker, kill it (kill_on_drop is the safety net).
+            if let Some(mut c) = children.lock().unwrap().remove(&task_id) {
+                let _ = c.start_kill();
+            }
+            return Err(mlua::Error::external(format!(
+                "python script timed out after {timeout_ms}ms ({})",
+                script_canonical.display()
+            )));
+        }
+    };
+
+    // (i) drain io tasks
+    let stdout_bytes = stdout_task.await.unwrap_or_default();
+    let stderr_str = stderr_task.await.unwrap_or_default();
+    let stdout_str = String::from_utf8_lossy(&stdout_bytes);
+
+    // (j) parse last non-empty line of stdout as JSON. Empty stdout → null.
+    let last_line = stdout_str
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .next_back()
+        .unwrap_or("");
+    let parsed: serde_json::Value = if last_line.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(last_line).map_err(|e| {
+            mlua::Error::external(format!(
+                "run_python: last stdout line is not JSON: {e}\n--- stdout ---\n{}--- stderr ---\n{}",
+                stdout_str, stderr_str
+            ))
+        })?
+    };
+
+    // (k) build return table
+    let result = lua.create_table()?;
+    result.set("stdout", lua.to_value(&parsed)?)?;
+    result.set("stderr", stderr_str)?;
+    result.set("code", status.code().unwrap_or(-1))?;
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// ServerApi — the global `Server` userdata exposed to Lua.
+// ---------------------------------------------------------------------------
 
 pub struct ServerApi {
     pub triggers: TriggerList,
@@ -276,6 +551,9 @@ pub struct ServerApi {
     pub crash_triggers: CrashTriggerList,
     pub plugins: PluginRegistry,
     pub lifecycle_events: LifecycleEvents,
+    pub mcrw_config: Arc<McrwConfig>,
+    pub children: ChildTracker,
+    pub next_child_id: ChildIdCounter,
 }
 
 impl UserData for ServerApi {
@@ -308,6 +586,9 @@ impl UserData for ServerApi {
                     stop_triggers: this.stop_triggers.clone(),
                     crash_triggers: this.crash_triggers.clone(),
                     lifecycle_events: this.lifecycle_events.clone(),
+                    mcrw_config: this.mcrw_config.clone(),
+                    children: this.children.clone(),
+                    next_child_id: this.next_child_id.clone(),
                 })
             },
         );
@@ -381,8 +662,21 @@ pub fn reload_plugins(
     crash_triggers: &CrashTriggerList,
     plugins: &PluginRegistry,
     lifecycle_events: &LifecycleEvents,
+    children: &ChildTracker,
 ) -> mlua::Result<()> {
     println!("[MCRW] Reloading plugins...");
+
+    // kill any in-flight python children before invalidating Lua state.
+    // we do not await wait() — kill_on_drop(true) is the safety net.
+    {
+        let drained: Vec<(u64, Child)> = {
+            let mut g = children.lock().unwrap();
+            g.drain().collect()
+        };
+        for (_id, mut c) in drained {
+            let _ = c.start_kill();
+        }
+    }
 
     triggers.lock().unwrap().clear();
     stop_triggers.lock().unwrap().clear();

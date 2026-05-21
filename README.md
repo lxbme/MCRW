@@ -1,6 +1,6 @@
 # Minecraft Rust Wrapper (MCRW)
 
-![](./img/mcrw_title.png)
+![](./docs/img/mcrw_title.png)
 
 [![crates.io](https://img.shields.io/crates/v/mcrstw.svg)](https://crates.io/crates/mcrstw)
 [![downloads](https://img.shields.io/crates/d/mcrstw.svg)](https://crates.io/crates/mcrstw)
@@ -87,6 +87,8 @@ Lines you type into the wrapper terminal are forwarded to the Minecraft server s
 `!reload` is intentionally accepted **only** from the wrapper terminal — there is no in-game equivalent, so no online player can trigger a reload.
 
 ## Plugin Development
+
+> **For the complete reference**, see the [**Plugin Development Guide**](./docs/plugin-development.md) in `docs/`. It covers the full Lua API, lifecycle events, the Python escape hatch, the execution model, and configuration-file schemas. The section below is an overview.
 
 Plugins are located in the `lua_plugins/` directory. Each plugin must have an `init.lua` entry point and a `meta.toml` describing the plugin.
 
@@ -199,6 +201,51 @@ The file is optional. If absent — or if a particular event key is missing — 
 Find more examples: https://github.com/lxbme/mcrw_lua_plugins
 
 > **Note on `!reload`:** Plugin module-level state (e.g. tables declared `local` at the top of `init.lua`) is **lost** when an operator runs `!reload` at the wrapper terminal. Persist anything you need to keep across reloads via `wrapper:load_config(...)` or another on-disk store.
+
+### Python Scripts (capability escape hatch)
+
+For tasks beyond pure Lua (file backup, SQL, HTTP, shell, ...), a plugin may bundle Python scripts inside its own directory and invoke them from Lua via `wrapper:run_python`. The call is asynchronous on the Rust side (it never blocks log parsing or other plugins), but appears synchronous to the calling Lua coroutine.
+
+```
+lua_plugins/my_plugin/
+  init.lua
+  scripts/backup.py
+```
+
+```lua
+local r = wrapper:run_python(
+    "scripts/backup.py",                -- path relative to *this* plugin's dir
+    { "--world", "world" },             -- argv (optional)
+    {                                   -- opts (all optional)
+        stdin      = "payload\n",
+        timeout_ms = 60000,
+        env        = { FOO = "bar" },
+    }
+)
+if r.code == 0 then
+    wrapper:log("archive: " .. r.stdout.archive)
+else
+    wrapper:log("[error] " .. r.stderr)
+end
+```
+
+**Protocol.**
+- The script is resolved relative to `lua_plugins/<this_plugin>/`. Paths that escape that directory (via `..` or symlinks) are rejected.
+- `r.stdout` is the **last non-empty line of stdout, parsed as JSON**. Print structured data only on that final line.
+- Use `stderr` freely for `print`/debug output; it is forwarded line-by-line to the wrapper console under a `[<plugin>][py]` prefix, and the full text is also returned as `r.stderr`.
+- `r.code` is the process exit code (or `-1` if the process was killed).
+- Default timeout is 30 s; override per-call with `opts.timeout_ms`. Timeout kills the process and surfaces a Lua error.
+- `!reload` kills all in-flight Python children before reloading plugins.
+
+**Security.** The Python interpreter inherits the wrapper process's full privileges (filesystem, network, child processes). The wrapper only enforces that **Lua** cannot reference a script outside its own plugin directory — once Python is running, it can do anything the wrapper user can do. **Installing a plugin that bundles Python scripts means trusting that plugin's author with shell access on your server host.** This is the design's intentional escape hatch; do not assume it is sandboxed.
+
+**Config (`mcrw.toml`, optional).** Place next to `server.jar` (same directory as `trigger_config.toml`):
+
+```toml
+[python]
+interpreter        = "python3"   # default; override for conda/venv/Windows
+default_timeout_ms = 30000       # default
+```
 
 ## Contributing
 

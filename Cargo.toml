@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "game-development"]
 authors = ["lxbme"]
 exclude = [
     "server/",
-    "img/",
+    "docs/",
     "target/",
     "*.log",
 ]

@@ -13,27 +13,32 @@
 
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
-use mlua::{Function, Lua, Value};
+use mlua::{Function, Lua, Variadic};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::mpsc,
 };
 
 use crate::lua_ctx::{
-    self, ControlMsg, CrashTriggerList, LifecycleEvents, PluginRegistry, StopTriggerList,
-    TriggerList,
+    self, ChildTracker, ControlMsg, CrashTriggerList, LifecycleEvents, PluginRegistry,
+    StopTriggerList, TriggerList,
 };
 
 pub fn spawn_cmd_sender(mut rx: mpsc::Receiver<String>, mut mc_stdin: tokio::process::ChildStdin) {
-    // this routine will send cmd which is in channel to minecraft stdin
+    // Forwards channel-supplied commands to the Minecraft server's stdin, one
+    // command per stdin line. Any interior CR/LF in `cmd` is collapsed to a
+    // single space so that an accidentally multi-line string (e.g. an mlua
+    // error with an embedded stack traceback) cannot fan out into multiple
+    // server commands.
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
-            let cmd_with_newline: String = if cmd.ends_with('\n') {
-                cmd
-            } else {
-                format!("{}\n", cmd)
-            };
-            if let Err(e) = mc_stdin.write_all(cmd_with_newline.as_bytes()).await {
+            let stripped = cmd.trim_end_matches(|c| c == '\n' || c == '\r');
+            let sanitized: String = stripped
+                .chars()
+                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
+            let line = format!("{}\n", sanitized);
+            if let Err(e) = mc_stdin.write_all(line.as_bytes()).await {
                 eprintln!("[Error] Failed to write to server stdin: {}", e);
                 break;
             }
@@ -75,6 +80,7 @@ pub async fn run_main_loop(
     crash_triggers: CrashTriggerList,
     plugins: PluginRegistry,
     lifecycle_events: LifecycleEvents,
+    children: ChildTracker,
     mut ctl_rx: mpsc::Receiver<ControlMsg>,
     lua: &Lua,
 ) {
@@ -96,42 +102,57 @@ pub async fn run_main_loop(
 
                 let mut commands_to_exec: Vec<String> = Vec::new();
 
-                // trigger gard field
-                {
-                    let triggers_gard = triggers
-                        .lock()
-                        .expect("[MCRW] [PANIC] Fail to lock trigger list");
-                    for trigger in triggers_gard.iter() {
-                        if let Some(caps) = trigger.regex.captures(&line) {
-                            // prepare args for lua callback
-                            let mut args = Vec::new();
-                            args.push(Value::String(lua.create_string(&line).unwrap())); // full line for first
-
+                // --- trigger dispatch ---------------------------------------------------
+                // Snapshot matching (Function, args) tuples under the lock, then await
+                // each callback with the lock released. mlua's `Function` is Send+Clone
+                // under the `send` feature, so it can cross the await boundary safely.
+                let pending: Vec<(Function, Vec<String>)> = {
+                    let g = match triggers.lock() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            eprintln!("[MCRW] [ERROR] trigger lock poisoned: {e}");
+                            continue;
+                        }
+                    };
+                    let mut v = Vec::new();
+                    for t in g.iter() {
+                        if let Some(caps) = t.regex.captures(&line) {
+                            let mut args = Vec::with_capacity(caps.len());
+                            args.push(line.clone());
                             for i in 1..caps.len() {
-                                let cap_str: &str =
-                                    caps.get(i).map_or("", |m: regex::Match<'_>| m.as_str());
-                                args.push(Value::String(lua.create_string(cap_str).unwrap()));
+                                args.push(caps.get(i).map_or("", |m| m.as_str()).to_string());
                             }
-
-                            // fetch call back and execute
-                            let func: Function = lua.registry_value(&trigger.callback).unwrap();
-
-                            // get return and add to commands_to_exec vec
-                            let result: Option<Vec<String>> = func
-                                .call(mlua::Variadic::from_iter(args))
-                                .expect("[MCRW] Fail to execute callback");
-                            if let Some(cmds) = result {
-                                commands_to_exec.extend(cmds);
+                            match lua.registry_value::<Function>(&t.callback) {
+                                Ok(f) => v.push((f, args)),
+                                Err(e) => eprintln!("[MCRW] [ERROR] trigger registry lookup: {e}"),
                             }
                         }
                     }
-                } // lock gard release here
+                    v
+                };
+                for (f, args) in pending {
+                    match f
+                        .call_async::<Option<Vec<String>>>(Variadic::from_iter(args))
+                        .await
+                    {
+                        Ok(Some(cmds)) => commands_to_exec.extend(cmds),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("[MCRW] [ERROR] trigger callback failed: {e}"),
+                    }
+                }
 
-                // lifecycle event dispatch (e.g. `start`)
-                {
-                    let mut events = lifecycle_events
-                        .lock()
-                        .expect("[MCRW] [PANIC] Fail to lock lifecycle_events");
+                // --- lifecycle dispatch (e.g. `start`) ----------------------------------
+                // Update `fired` flags and collect callbacks under the lock, then await
+                // outside it.
+                let lifecycle_pending: Vec<Function> = {
+                    let mut events = match lifecycle_events.lock() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            eprintln!("[MCRW] [ERROR] lifecycle lock poisoned: {e}");
+                            continue;
+                        }
+                    };
+                    let mut funcs = Vec::new();
                     for (_name, state) in events.iter_mut() {
                         let mut should_fire = false;
                         for p in state.patterns.iter_mut() {
@@ -147,18 +168,22 @@ pub async fn run_main_loop(
                         }
                         if should_fire {
                             for cb_key in state.callbacks.iter() {
-                                let func: Function = lua.registry_value(cb_key).unwrap();
-                                let arg = Value::String(lua.create_string(&line).unwrap());
-                                match func.call::<Option<Vec<String>>>(arg) {
-                                    Ok(Some(cmds)) => commands_to_exec.extend(cmds),
-                                    Ok(None) => {}
+                                match lua.registry_value::<Function>(cb_key) {
+                                    Ok(f) => funcs.push(f),
                                     Err(e) => eprintln!(
-                                        "[MCRW] [ERROR] lifecycle callback failed: {}",
-                                        e
+                                        "[MCRW] [ERROR] lifecycle registry lookup: {e}"
                                     ),
                                 }
                             }
                         }
+                    }
+                    funcs
+                };
+                for f in lifecycle_pending {
+                    match f.call_async::<Option<Vec<String>>>(line.clone()).await {
+                        Ok(Some(cmds)) => commands_to_exec.extend(cmds),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("[MCRW] [ERROR] lifecycle callback failed: {e}"),
                     }
                 }
 
@@ -179,6 +204,7 @@ pub async fn run_main_loop(
                             &crash_triggers,
                             &plugins,
                             &lifecycle_events,
+                            &children,
                         ) {
                             eprintln!("[MCRW] [ERROR] reload failed: {}", e);
                         }
@@ -200,15 +226,28 @@ pub async fn check_shutdown(
         Ok(status) => {
             if status.success() {
                 println!("[MCRW] Minecraft server stopped gracefully (Exit Code: 0).");
-                // on server stop
-                let stop_triggers = stop_triggers
-                    .lock()
-                    .expect("[MCRW] [PANIC] Fail to lock stop_triggers");
-                for stop_trigger in stop_triggers.iter() {
-                    let func: Function = lua.registry_value(&stop_trigger.callback).unwrap();
-                    let _: () = func
-                        .call(mlua::Variadic::from_iter(Vec::<String>::new()))
-                        .expect("[MCWR] [PANIC] Fail to execute stop_trigger");
+                let funcs: Vec<Function> = {
+                    let g = match stop_triggers.lock() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            eprintln!("[MCRW] [ERROR] stop_triggers lock poisoned: {e}");
+                            return;
+                        }
+                    };
+                    g.iter()
+                        .filter_map(|st| match lua.registry_value::<Function>(&st.callback) {
+                            Ok(f) => Some(f),
+                            Err(e) => {
+                                eprintln!("[MCRW] [ERROR] stop registry lookup: {e}");
+                                None
+                            }
+                        })
+                        .collect()
+                };
+                for f in funcs {
+                    if let Err(e) = f.call_async::<()>(()).await {
+                        eprintln!("[MCRW] [ERROR] stop callback failed: {}", e);
+                    }
                 }
             } else {
                 let code = status.code().unwrap_or(-1);
@@ -216,14 +255,28 @@ pub async fn check_shutdown(
                     "[MCRW] [WARNING] Minecraft server crashed or stopped unexpectedly! (Exit Code: {})",
                     code
                 );
-                let crash_triggers = crash_triggers
-                    .lock()
-                    .expect("[MCRW] [PANIC] Fail to lock stop_triggers");
-                for crash_trigger in crash_triggers.iter() {
-                    let func: Function = lua.registry_value(&crash_trigger.callback).unwrap();
-                    let _: () = func
-                        .call(mlua::Variadic::from_iter(Vec::<String>::new()))
-                        .expect("[MCWR] [PANIC] Fail to execute stop_trigger");
+                let funcs: Vec<Function> = {
+                    let g = match crash_triggers.lock() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            eprintln!("[MCRW] [ERROR] crash_triggers lock poisoned: {e}");
+                            return;
+                        }
+                    };
+                    g.iter()
+                        .filter_map(|ct| match lua.registry_value::<Function>(&ct.callback) {
+                            Ok(f) => Some(f),
+                            Err(e) => {
+                                eprintln!("[MCRW] [ERROR] crash registry lookup: {e}");
+                                None
+                            }
+                        })
+                        .collect()
+                };
+                for f in funcs {
+                    if let Err(e) = f.call_async::<()>(()).await {
+                        eprintln!("[MCRW] [ERROR] crash callback failed: {}", e);
+                    }
                 }
             }
         }

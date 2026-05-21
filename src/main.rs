@@ -24,12 +24,14 @@ use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::lua_ctx::{
-    ControlMsg, CrashTriggerList, LifecycleEvents, PluginRegistry, ServerApi, StopTriggerList,
+    ChildIdCounter, ChildTracker, ControlMsg, CrashTriggerList, LifecycleEvents, PluginRegistry,
+    ServerApi, StopTriggerList,
 };
 
 #[tokio::main]
@@ -48,12 +50,18 @@ async fn main() {
     let lifecycle_events: LifecycleEvents = Arc::new(Mutex::new(
         lua_ctx::compile_trigger_config(trigger_cfg),
     ));
+    let mcrw_config = lua_ctx::load_mcrw_config(Path::new("mcrw.toml"));
+    let children: ChildTracker = Arc::new(Mutex::new(HashMap::new()));
+    let next_child_id: ChildIdCounter = Arc::new(AtomicU64::new(1));
     let server_api = ServerApi {
         triggers: triggers.clone(),
         stop_triggers: stop_triggers.clone(),
         crash_triggers: crash_triggers.clone(),
         plugins: plugins.clone(),
         lifecycle_events: lifecycle_events.clone(),
+        mcrw_config: mcrw_config.clone(),
+        children: children.clone(),
+        next_child_id: next_child_id.clone(),
     };
     lua.globals()
         .set("Server", server_api)
@@ -111,6 +119,7 @@ async fn main() {
         crash_triggers.clone(),
         plugins.clone(),
         lifecycle_events.clone(),
+        children.clone(),
         ctl_rx,
         &lua,
     )
