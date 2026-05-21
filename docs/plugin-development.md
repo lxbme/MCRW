@@ -229,6 +229,7 @@ signatures and behaviors are documented inline in the sections referenced.
 | `wrapper:register_on_crash(callback)`                   | [§4.2](#42-lifecycle-events) | Run a callback on abnormal server exit.                  |
 | `wrapper:log(msg)`                                      | [§6](#6-logging) | Print `[<plugin_name>] <msg>` to the wrapper console.    |
 | `wrapper:meta()`                                        | [§3](#3-the-wrapper-handle)  | Return the plugin's parsed `meta.toml` as a Lua table.   |
+| `wrapper:is_op(name)`                                   | [§3](#3-the-wrapper-handle)  | `true` if `name` appears in the server's `ops.json` (case-insensitive). |
 | `wrapper:load_config(default)`                          | [§5.1](#51-per-plugin-configjson) | Load (or initialize) the plugin's `config.json`.         |
 | `wrapper:command(cmd)`                                  | [§4.4](#44-returning-commands) | **Async.** Push one command to the server queue immediately. |
 | `wrapper:run_python(script, args, opts)`                | [§8](#8-python-scripts-escape-hatch) | **Async.** Execute a Python script inside the plugin directory. |
@@ -1226,6 +1227,34 @@ Print `[<plugin_name>] <message>` to the wrapper's standard output.
 
 Return the plugin's `meta.toml` as a Lua table. The returned table has
 the fields documented in [§2.2](#22-the-metatoml-manifest).
+
+### `wrapper:is_op(name)`
+
+Return `true` if `name` appears in the server's `ops.json`,
+`false` otherwise. Matching is case-insensitive (mirrors Minecraft's
+own command parser).
+
+* `name` (string, required) — player name to look up.
+* **Returns:** boolean.
+
+The file is re-read on every call, so changes from in-game `/op` /
+`/deop` or hand edits take effect immediately with no plugin reload.
+
+**Graceful degradation.** If `ops.json` is missing the call returns
+`false` (no ops = nobody is op). If the file exists but cannot be read
+or is not valid JSON, the call still returns `false`, and the wrapper
+logs `[MCRW] [ERROR] reading ops.json: …` (or `parsing ops.json: …`)
+to stderr. This is intentional: a permission check should fail closed
+on transient errors rather than crash chat handlers.
+
+```lua
+wrapper:register("<(.+)> !reload$", function(_, name)
+    if not wrapper:is_op(name) then
+        return { "tell " .. name .. " You are not an operator." }
+    end
+    return { "say reloading…" }
+end)
+```
 
 ### `wrapper:load_config(default_table)`
 

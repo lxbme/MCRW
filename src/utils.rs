@@ -21,7 +21,7 @@ pub fn print_logo() {
       | | | | | | (__| |   \ V  V / 
       |_| |_| |_|\___|_|    \_/\_/   
                                          
-      Minecraft Rust Wrapper v0.2.1
+      Minecraft Rust Wrapper v0.2.2
     "#;
     println!("{}", logo);
 }

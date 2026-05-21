@@ -240,6 +240,36 @@ pub fn compile_trigger_config(cfg: TriggerConfig) -> HashMap<String, LifecycleEv
 }
 
 // ---------------------------------------------------------------------------
+// ops.json helper — read by `wrapper:is_op`. Re-read on every call: the file
+// is tiny and mutates whenever `/op`/`/deop` runs, so caching would only
+// invite staleness. All error paths degrade to an empty list so the caller
+// returns `false` (least-privilege default for a permission check).
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct OpEntry {
+    name: String,
+}
+
+fn read_op_names() -> Vec<String> {
+    let content = match fs::read_to_string("ops.json") {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            eprintln!("[MCRW] [ERROR] reading ops.json: {e}");
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str::<Vec<OpEntry>>(&content) {
+        Ok(list) => list.into_iter().map(|o| o.name).collect(),
+        Err(e) => {
+            eprintln!("[MCRW] [ERROR] parsing ops.json: {e}");
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PluginApi — exposed to Lua as the per-plugin `wrapper` handle.
 // ---------------------------------------------------------------------------
 
@@ -347,6 +377,19 @@ impl UserData for PluginApi {
         methods.add_method("meta", |lua: &Lua, this: &Self, ()| {
             lua.to_value(&this.meta)
         });
+
+        // Permission check against the server's standard `ops.json`. Match is
+        // case-insensitive (mirrors Minecraft's own command parser). Missing
+        // or malformed ops.json degrade to `false`; hard IO/parse errors are
+        // logged to stderr so admins still notice misconfiguration.
+        methods.add_method(
+            "is_op",
+            |_lua: &Lua, _this: &Self, name: String| -> mlua::Result<bool> {
+                Ok(read_op_names()
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(&name)))
+            },
+        );
 
         methods.add_method(
             "load_config",
