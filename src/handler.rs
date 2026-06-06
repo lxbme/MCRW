@@ -14,10 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use mlua::{Function, Lua, Variadic};
+use rustyline::{DefaultEditor, error::ReadlineError};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::mpsc,
 };
+
+use crate::{teprintln, tprintln};
 
 use crate::lua_ctx::{
     self, ChildTracker, ControlMsg, CrashTriggerList, CronJobList, LifecycleEvents, PluginRegistry,
@@ -39,11 +42,11 @@ pub fn spawn_cmd_sender(mut rx: mpsc::Receiver<String>, mut mc_stdin: tokio::pro
                 .collect();
             let line = format!("{}\n", sanitized);
             if let Err(e) = mc_stdin.write_all(line.as_bytes()).await {
-                eprintln!("[Error] Failed to write to server stdin: {}", e);
+                teprintln!("[Error] Failed to write to server stdin: {}", e);
                 break;
             }
             if let Err(e) = mc_stdin.flush().await {
-                eprintln!("[Error] Failed to flush stdin: {}", e);
+                teprintln!("[Error] Failed to flush stdin: {}", e);
                 break;
             }
         }
@@ -68,6 +71,93 @@ pub fn spawn_terminal_receiver(tx: mpsc::Sender<String>, ctl_tx: mpsc::Sender<Co
                 break;
             }
             line.clear();
+        }
+    });
+}
+
+// Force-quit: terminate the Minecraft server child (so it isn't left orphaned
+// when the wrapper exits) and then exit the process. SIGKILL guarantees the
+// child dies even if it is wedged and ignoring `stop`/SIGTERM — this is the
+// escalation path, reached only after a graceful `stop` was already offered on
+// the first Ctrl-C, or via an explicit Ctrl-D.
+fn force_quit(child_pid: Option<u32>) -> ! {
+    #[cfg(unix)]
+    if let Some(pid) = child_pid {
+        // SAFETY: `kill` is a simple syscall; passing a stale pid just returns
+        // an error (ESRCH), which we ignore.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        tprintln!("[MCRW] Killed server process (pid {pid}).");
+    }
+    #[cfg(not(unix))]
+    let _ = child_pid;
+    std::process::exit(0);
+}
+
+pub fn spawn_console_editor(
+    mut editor: DefaultEditor,
+    tx: mpsc::Sender<String>,
+    ctl_tx: mpsc::Sender<ControlMsg>,
+    child_pid: Option<u32>,
+) {
+    // Interactive console: rustyline gives us line editing + Up/Down history
+    // recall. It is a BLOCKING API, so it runs on a dedicated std::thread (not a
+    // tokio task) — `mpsc::Sender::blocking_send` panics if called from a
+    // runtime thread, and a plain thread gives clean ownership of the editor.
+    //
+    // All other terminal output flows through the global `term` sink (the
+    // editor's ExternalPrinter, installed in main), so server log lines print
+    // ABOVE the live input line instead of clobbering it.
+    std::thread::spawn(move || {
+        // Ctrl-C is a two-step shutdown: the first press sends a graceful `stop`
+        // to the server; a second consecutive Ctrl-C (or Ctrl-D) force-quits.
+        // Any successfully entered line disarms it.
+        let mut ctrl_c_armed = false;
+
+        loop {
+            match editor.readline("> ") {
+                Ok(line) => {
+                    ctrl_c_armed = false;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    // In-memory history only; not persisted across restarts.
+                    let _ = editor.add_history_entry(trimmed);
+
+                    if trimmed == "!reload" {
+                        if ctl_tx.blocking_send(ControlMsg::Reload).is_err() {
+                            break; // receiver gone → wrapper shutting down
+                        }
+                    } else if tx.blocking_send(trimmed.to_string()).is_err() {
+                        break;
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    // Ctrl-C
+                    if ctrl_c_armed {
+                        tprintln!("[MCRW] Force-quitting.");
+                        force_quit(child_pid);
+                    }
+                    ctrl_c_armed = true;
+                    if tx.blocking_send("stop".to_string()).is_err() {
+                        break;
+                    }
+                    tprintln!(
+                        "[MCRW] Sent 'stop' to server. Press Ctrl-C again or Ctrl-D to force-quit."
+                    );
+                }
+                Err(ReadlineError::Eof) => {
+                    // Ctrl-D
+                    tprintln!("[MCRW] Force-quitting (EOF).");
+                    force_quit(child_pid);
+                }
+                Err(e) => {
+                    teprintln!("[MCRW] readline error: {}", e);
+                    break;
+                }
+            }
         }
     });
 }
@@ -100,11 +190,11 @@ pub async fn run_main_loop(
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(e) => {
-                        eprintln!("[MCRW] read line failed: {}", e);
+                        teprintln!("[MCRW] read line failed: {}", e);
                         break;
                     }
                 };
-                println!("[MC] {}", line);
+                tprintln!("[MC] {}", line);
 
                 // Snapshot matching (Function, args) tuples + lifecycle callbacks under
                 // their locks, then hand the whole dispatch off to a spawned task. This
@@ -117,7 +207,7 @@ pub async fn run_main_loop(
                     let g = match triggers.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            eprintln!("[MCRW] [ERROR] trigger lock poisoned: {e}");
+                            teprintln!("[MCRW] [ERROR] trigger lock poisoned: {e}");
                             continue;
                         }
                     };
@@ -131,7 +221,7 @@ pub async fn run_main_loop(
                             }
                             match lua.registry_value::<Function>(&t.callback) {
                                 Ok(f) => v.push((f, args)),
-                                Err(e) => eprintln!("[MCRW] [ERROR] trigger registry lookup: {e}"),
+                                Err(e) => teprintln!("[MCRW] [ERROR] trigger registry lookup: {e}"),
                             }
                         }
                     }
@@ -142,7 +232,7 @@ pub async fn run_main_loop(
                     let mut events = match lifecycle_events.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            eprintln!("[MCRW] [ERROR] lifecycle lock poisoned: {e}");
+                            teprintln!("[MCRW] [ERROR] lifecycle lock poisoned: {e}");
                             continue;
                         }
                     };
@@ -164,7 +254,7 @@ pub async fn run_main_loop(
                             for cb_key in state.callbacks.iter() {
                                 match lua.registry_value::<Function>(cb_key) {
                                     Ok(f) => funcs.push(f),
-                                    Err(e) => eprintln!(
+                                    Err(e) => teprintln!(
                                         "[MCRW] [ERROR] lifecycle registry lookup: {e}"
                                     ),
                                 }
@@ -187,7 +277,7 @@ pub async fn run_main_loop(
                                 Ok(Some(cmds)) => commands_to_exec.extend(cmds),
                                 Ok(None) => {}
                                 Err(e) => {
-                                    eprintln!("[MCRW] [ERROR] trigger callback failed: {e}")
+                                    teprintln!("[MCRW] [ERROR] trigger callback failed: {e}")
                                 }
                             }
                         }
@@ -199,14 +289,14 @@ pub async fn run_main_loop(
                                 Ok(Some(cmds)) => commands_to_exec.extend(cmds),
                                 Ok(None) => {}
                                 Err(e) => {
-                                    eprintln!("[MCRW] [ERROR] lifecycle callback failed: {e}")
+                                    teprintln!("[MCRW] [ERROR] lifecycle callback failed: {e}")
                                 }
                             }
                         }
                         for cmd in commands_to_exec {
                             match tx_line.send(format!("{}\n", cmd)).await {
-                                Ok(_) => println!("[MCRW -> Server]: {}", cmd),
-                                Err(_) => println!("[MCRW] Fail to send cmd: {}", cmd),
+                                Ok(_) => tprintln!("[MCRW -> Server]: {}", cmd),
+                                Err(_) => tprintln!("[MCRW] Fail to send cmd: {}", cmd),
                             };
                         }
                     });
@@ -225,7 +315,7 @@ pub async fn run_main_loop(
                             &children,
                             &cron_jobs,
                         ) {
-                            eprintln!("[MCRW] [ERROR] reload failed: {}", e);
+                            teprintln!("[MCRW] [ERROR] reload failed: {}", e);
                         }
                     }
                     None => {}
@@ -260,15 +350,15 @@ pub async fn run_main_loop(
                             {
                                 Ok(Some(cmds)) => commands_to_exec.extend(cmds),
                                 Ok(None) => {}
-                                Err(e) => eprintln!(
+                                Err(e) => teprintln!(
                                     "[MCRW] [ERROR] cron callback failed ({plugin} / {expr}): {e}"
                                 ),
                             }
                         }
                         for cmd in commands_to_exec {
                             match tx_line.send(format!("{}\n", cmd)).await {
-                                Ok(_) => println!("[MCRW -> Server]: {}", cmd),
-                                Err(_) => println!("[MCRW] Fail to send cmd: {}", cmd),
+                                Ok(_) => tprintln!("[MCRW -> Server]: {}", cmd),
+                                Err(_) => tprintln!("[MCRW] Fail to send cmd: {}", cmd),
                             };
                         }
                     });
