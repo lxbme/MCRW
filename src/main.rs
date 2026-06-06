@@ -59,6 +59,14 @@ async fn main() {
     // sender can be cloned into ServerApi for the new wrapper:command API.
     let (tx, rx) = mpsc::channel::<String>(max_cmd_queue);
 
+    // Shared HTTP client for wrapper:http_request — built once so connections
+    // are pooled and reused across plugins/calls. Survives !reload (lives on
+    // the persistent Server global, not the per-load plugin state).
+    let http_client = reqwest::Client::builder()
+        .user_agent(concat!("MCRW/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("[MCRW] [PANIC] Fail to build HTTP client");
+
     let server_api = ServerApi {
         triggers: triggers.clone(),
         stop_triggers: stop_triggers.clone(),
@@ -70,6 +78,7 @@ async fn main() {
         next_child_id: next_child_id.clone(),
         cmd_tx: tx.clone(),
         cron_jobs: cron_jobs.clone(),
+        http_client,
     };
     lua.globals()
         .set("Server", server_api)

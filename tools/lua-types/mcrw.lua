@@ -67,6 +67,22 @@
 ---@field stderr string  The script's full stderr output.
 ---@field code integer   The process exit code. `-1` if the process was killed (e.g. timeout).
 
+--- Options for `wrapper:http_request`.
+---@class mcrw.HttpOpts
+---@field url string                The request URL. Required.
+---@field method? string            HTTP method; defaults to "GET". Case-insensitive.
+---@field headers? table<string,string> Request headers.
+---@field body? string              Raw request body. Mutually exclusive with `json`.
+---@field json? any                 A value to JSON-encode as the body; also sets Content-Type: application/json unless already set. Mutually exclusive with `body`.
+---@field timeout_ms? integer       Per-request timeout; defaults to mcrw.toml's http.default_timeout_ms (30000).
+
+--- Result of `wrapper:http_request`.
+---@class mcrw.HttpResponse
+---@field status integer             The HTTP status code.
+---@field ok boolean                 True if `status` is in the 200–299 range.
+---@field headers table<string,string> Response headers, with lowercased names.
+---@field body string                The full response body as a string. Use `wrapper:json_decode` to parse JSON.
+
 --------------------------------------------------------------------------------
 -- The `wrapper` handle (per-plugin), returned by `Server:get_context`.
 --------------------------------------------------------------------------------
@@ -150,6 +166,40 @@ function Wrapper:log(msg) end
 ---@param opts? mcrw.PythonOpts
 ---@return mcrw.PythonResult
 function Wrapper:run_python(script, args, opts) end
+
+--- Perform a one-shot HTTP request. Yields the current coroutine until the
+--- full response has been received, then returns it. Transport failures (DNS,
+--- connection, timeout) raise a Lua error — wrap in `pcall` to handle them; a
+--- non-2xx status is NOT an error and returns normally with `ok = false`.
+---
+--- ```lua
+--- local resp = wrapper:http_request{
+---   url = "https://api.example.com/x",
+---   method = "POST",
+---   json = { key = "value" },
+--- }
+--- if resp.ok then
+---   local data = wrapper:json_decode(resp.body)
+--- end
+--- ```
+---
+--- (Streaming responses — `wrapper:http_stream` — are a reserved, not-yet-
+--- implemented capability.)
+---@param opts mcrw.HttpOpts
+---@return mcrw.HttpResponse
+function Wrapper:http_request(opts) end
+
+--- Encode a Lua value as a JSON string. Lua 5.4 has no built-in JSON library,
+--- so use this to build request bodies. Raises on values that cannot be
+--- represented as JSON.
+---@param value any
+---@return string
+function Wrapper:json_encode(value) end
+
+--- Decode a JSON string into a Lua value. Raises on invalid JSON.
+---@param str string
+---@return any
+function Wrapper:json_decode(str) end
 
 --------------------------------------------------------------------------------
 -- The global `Server` object.

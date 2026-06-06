@@ -53,9 +53,10 @@ Minecraft server JVM child process that the wrapper manages.
 10. [Error Handling](#10-error-handling)
 11. [Best Practices](#11-best-practices)
 12. [Complete Example](#12-complete-example)
-13. [Appendix A — API Reference](#appendix-a--api-reference)
-14. [Appendix B — Configuration File Schemas](#appendix-b--configuration-file-schemas)
-15. [Appendix C — Compatibility Notes](#appendix-c--compatibility-notes)
+13. [HTTP Requests and JSON](#13-http-requests-and-json)
+14. [Appendix A — API Reference](#appendix-a--api-reference)
+15. [Appendix B — Configuration File Schemas](#appendix-b--configuration-file-schemas)
+16. [Appendix C — Compatibility Notes](#appendix-c--compatibility-notes)
 
 ---
 
@@ -622,6 +623,9 @@ configuration that is not specific to any one plugin. Its current schema:
 [python]
 interpreter        = "python3"   # Path or PATH-lookup name for the Python interpreter
 default_timeout_ms = 30000       # Default per-call timeout for wrapper:run_python
+
+[http]
+default_timeout_ms = 30000       # Default per-request timeout for wrapper:http_request
 ```
 
 The file is optional. When absent, all values default as shown above.
@@ -1193,6 +1197,85 @@ if __name__ == "__main__":
 
 ---
 
+## 13. HTTP Requests and JSON
+
+`wrapper:http_request` performs a one-shot HTTP request from a plugin. Like
+`wrapper:command` and `wrapper:run_python`, it is asynchronous: it yields the
+current coroutine until the full response is buffered, then returns it. The
+main loop keeps processing server output while the request is in flight.
+
+```lua
+local resp = wrapper:http_request({
+    url     = "https://api.example.com/players/" .. name,
+    method  = "GET",                              -- optional, defaults to "GET"
+    headers = { Authorization = "Bearer " .. token },
+    timeout_ms = 10000,                           -- optional, defaults to mcrw.toml [http]
+})
+
+if resp.ok then
+    local data = wrapper:json_decode(resp.body)
+    wrapper:command("say Welcome back, level " .. data.level)
+end
+```
+
+The request table accepts:
+
+| Field        | Type                   | Notes                                                                 |
+|--------------|------------------------|-----------------------------------------------------------------------|
+| `url`        | string (**required**)  | The request URL.                                                      |
+| `method`     | string                 | Defaults to `"GET"`. Case-insensitive.                               |
+| `headers`    | table&lt;string,string&gt; | Request headers.                                                  |
+| `body`       | string                 | Raw request body. Mutually exclusive with `json`.                    |
+| `json`       | any                    | JSON-encoded into the body; also sets `Content-Type: application/json` unless you set it yourself. Mutually exclusive with `body`. |
+| `timeout_ms` | integer                | Per-request timeout. Defaults to `mcrw.toml`'s `http.default_timeout_ms`. |
+
+The response table contains:
+
+| Field     | Type                   | Notes                                              |
+|-----------|------------------------|----------------------------------------------------|
+| `status`  | integer                | HTTP status code.                                  |
+| `ok`      | boolean                | `true` when `status` is 200–299.                  |
+| `headers` | table&lt;string,string&gt; | Response headers, with **lowercased** names.   |
+| `body`    | string                 | Full response body. Parse with `wrapper:json_decode`. |
+
+**Error contract.** A transport failure — DNS resolution, connection refused,
+TLS error, or the timeout elapsing — raises a Lua error. Wrap the call in
+`pcall` if you need to recover. A non-2xx HTTP status is **not** an error: the
+call returns normally with `ok = false` so you can inspect `status` and `body`.
+
+```lua
+local okcall, resp = pcall(function()
+    return wrapper:http_request({ url = "https://example.invalid/" })
+end)
+if not okcall then
+    wrapper:log("request failed: " .. tostring(resp))
+end
+```
+
+### JSON helpers
+
+Lua 5.4 ships no JSON library, so the wrapper provides two helpers backed by
+the same `serde_json` codec used elsewhere:
+
+```lua
+local body = wrapper:json_encode({ msg = "hi", n = 3 })  --> '{"msg":"hi","n":3}'
+local tbl  = wrapper:json_decode('{"a":[1,2,3]}')        --> { a = { 1, 2, 3 } }
+```
+
+`json_encode` raises on values that cannot be represented as JSON;
+`json_decode` raises on malformed input. When sending JSON you usually do not
+need `json_encode` directly — pass `json = <value>` to `http_request` instead.
+
+> **Streaming.** Streaming responses (Server-Sent Events / chunked
+> `http_stream`) are a reserved, not-yet-implemented capability. `http_request`
+> buffers the entire response body before returning.
+
+> **Trust.** `http_request` grants a plugin outbound network access with the
+> wrapper's privileges. As with `run_python`, installing a plugin is a trust
+> decision.
+
+---
+
 ## Appendix A — API Reference
 
 This appendix summarizes the complete Lua API surface exposed by the
@@ -1338,6 +1421,37 @@ Execute a Python script located inside this plugin's directory. See
 | Stdout last line is not valid JSON     | `run_python: last stdout line is not JSON: <err>\n--- stdout ---\n...--- stderr ---\n...` |
 | Child killed by reload                 | `child was killed by reload`                                  |
 
+### `wrapper:http_request(opts)` *(async)*
+
+Perform a one-shot HTTP request. See [§13](#13-http-requests-and-json).
+
+* `opts` (table, required) — `url` (required), `method`, `headers`, `body`,
+  `json`, `timeout_ms`. `body` and `json` are mutually exclusive.
+* **Returns:** `{ status = <int>, ok = <bool>, headers = <table>, body = <string> }`.
+* A non-2xx status returns normally (`ok = false`); only transport failures raise.
+
+**Errors raised:**
+
+| Condition                              | Message prefix                                               |
+|----------------------------------------|--------------------------------------------------------------|
+| `url` missing or not a string          | `wrapper:http_request: 'url' (string) is required`           |
+| `method` not a string                  | `wrapper:http_request: 'method' must be a string`            |
+| Invalid HTTP method                    | `invalid HTTP method '<m>': <err>`                           |
+| Invalid header name/value              | `invalid header name '<k>': ...` / `invalid value for header '<k>': ...` |
+| Both `body` and `json` set             | `wrapper:http_request: set only one of 'body' or 'json'`     |
+| `body` not a string                    | `wrapper:http_request: 'body' must be a string`              |
+| `timeout_ms` not a positive integer    | `wrapper:http_request: 'timeout_ms' must be a positive integer` |
+| Transport failure (DNS/connect/TLS/timeout) | `wrapper:http_request: <reqwest error>`                 |
+| Reading the response body fails        | `wrapper:http_request: reading body: <err>`                  |
+
+### `wrapper:json_encode(value)` / `wrapper:json_decode(str)`
+
+Encode a Lua value to a JSON string, or decode a JSON string to a Lua value.
+Backed by `serde_json`.
+
+* `json_encode` raises `wrapper:json_encode: <err>` on non-representable values.
+* `json_decode` raises `wrapper:json_decode: <err>` on malformed input.
+
 ---
 
 ## Appendix B — Configuration File Schemas
@@ -1374,6 +1488,7 @@ more lifecycle events.
 |------------|----------------------|---------|-------------|------------------------------------------------------------------------|
 | `[python]` | `interpreter`        | string  | `"python3"` | Interpreter binary; resolved against `$PATH` if not absolute.          |
 | `[python]` | `default_timeout_ms` | integer | `30000`     | Default per-call timeout for `wrapper:run_python` (milliseconds).      |
+| `[http]`   | `default_timeout_ms` | integer | `30000`     | Default per-request timeout for `wrapper:http_request` (milliseconds). |
 
 ---
 

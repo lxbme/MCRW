@@ -143,10 +143,28 @@ impl Default for PythonConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct HttpConfig {
+    #[serde(default = "default_http_timeout_ms")]
+    pub default_timeout_ms: u64,
+}
+fn default_http_timeout_ms() -> u64 {
+    30_000
+}
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_ms: default_http_timeout_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct McrwConfig {
     #[serde(default)]
     pub python: PythonConfig,
+    #[serde(default)]
+    pub http: HttpConfig,
 }
 
 pub fn load_mcrw_config(path: &Path) -> Arc<McrwConfig> {
@@ -286,6 +304,7 @@ pub struct PluginApi {
     next_child_id: ChildIdCounter,
     cmd_tx: mpsc::Sender<String>,
     cron_jobs: CronJobList,
+    http_client: reqwest::Client,
 }
 
 impl UserData for PluginApi {
@@ -480,7 +499,164 @@ impl UserData for PluginApi {
                 }
             },
         );
+
+        // JSON helpers. Lua 5.4 ships no JSON library, so plugins cannot build a
+        // request body or parse a response without these. Backed by serde_json,
+        // the same codec `run_python` uses for its stdout protocol.
+        methods.add_method("json_encode", |lua: &Lua, _this: &Self, v: Value| {
+            let jv: JsonValue = lua.from_value(v)?;
+            serde_json::to_string(&jv)
+                .map_err(|e| mlua::Error::external(format!("wrapper:json_encode: {e}")))
+        });
+
+        methods.add_method("json_decode", |lua: &Lua, _this: &Self, s: String| {
+            let jv: JsonValue = serde_json::from_str(&s)
+                .map_err(|e| mlua::Error::external(format!("wrapper:json_decode: {e}")))?;
+            lua.to_value(&jv)
+        });
+
+        // Async one-shot HTTP request. Yields the Lua coroutine until the full
+        // response is buffered, mirroring `command`/`run_python`. Transport
+        // failures (DNS, connect, timeout) raise; a non-2xx status returns
+        // normally with `ok = false`. Streaming (`http_stream`) is a reserved,
+        // not-yet-implemented namespace — see docs.
+        methods.add_async_method("http_request", |lua, this, opts: Table| {
+            let client = this.http_client.clone();
+            let default_timeout_ms = this.mcrw_config.http.default_timeout_ms;
+            let plugin = this.meta.name.clone();
+            async move { http_request_impl(lua, client, default_timeout_ms, plugin, opts).await }
+        });
     }
+}
+
+async fn http_request_impl(
+    lua: Lua,
+    client: reqwest::Client,
+    default_timeout_ms: u64,
+    plugin: String,
+    opts: Table,
+) -> mlua::Result<Table> {
+    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+
+    // url (required)
+    let url = match opts.get::<Value>("url")? {
+        Value::String(s) => s.to_str()?.to_string(),
+        _ => {
+            return Err(mlua::Error::external(
+                "wrapper:http_request: 'url' (string) is required",
+            ));
+        }
+    };
+
+    // method (default GET)
+    let method_str = match opts.get::<Value>("method")? {
+        Value::String(s) => s.to_str()?.to_string(),
+        Value::Nil => "GET".to_string(),
+        _ => {
+            return Err(mlua::Error::external(
+                "wrapper:http_request: 'method' must be a string",
+            ));
+        }
+    };
+    let method = reqwest::Method::from_bytes(method_str.to_uppercase().as_bytes())
+        .map_err(|e| mlua::Error::external(format!("invalid HTTP method '{method_str}': {e}")))?;
+
+    // headers
+    let mut header_map = HeaderMap::new();
+    if let Value::Table(h) = opts.get::<Value>("headers")? {
+        for pair in h.pairs::<String, String>() {
+            let (k, v) = pair?;
+            let name = HeaderName::from_bytes(k.as_bytes())
+                .map_err(|e| mlua::Error::external(format!("invalid header name '{k}': {e}")))?;
+            let val = HeaderValue::from_str(&v)
+                .map_err(|e| mlua::Error::external(format!("invalid value for header '{k}': {e}")))?;
+            header_map.insert(name, val);
+        }
+    }
+
+    // body XOR json
+    let body_val = opts.get::<Value>("body")?;
+    let json_val = opts.get::<Value>("json")?;
+    let has_body = !matches!(body_val, Value::Nil);
+    let has_json = !matches!(json_val, Value::Nil);
+    if has_body && has_json {
+        return Err(mlua::Error::external(
+            "wrapper:http_request: set only one of 'body' or 'json'",
+        ));
+    }
+    let body_bytes: Option<Vec<u8>> = if has_json {
+        let jv: JsonValue = lua.from_value(json_val)?;
+        let s = serde_json::to_string(&jv)
+            .map_err(|e| mlua::Error::external(format!("wrapper:http_request: encoding json: {e}")))?;
+        if !header_map.contains_key(CONTENT_TYPE) {
+            header_map.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        }
+        Some(s.into_bytes())
+    } else if has_body {
+        match body_val {
+            Value::String(s) => Some(s.as_bytes().to_vec()),
+            _ => {
+                return Err(mlua::Error::external(
+                    "wrapper:http_request: 'body' must be a string",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    // timeout (default from mcrw.toml [http])
+    let timeout_ms = match opts.get::<Value>("timeout_ms")? {
+        Value::Nil => default_timeout_ms,
+        Value::Integer(n) if n > 0 => n as u64,
+        _ => {
+            return Err(mlua::Error::external(
+                "wrapper:http_request: 'timeout_ms' must be a positive integer",
+            ));
+        }
+    };
+
+    // build + send
+    let mut req = client
+        .request(method, &url)
+        .headers(header_map)
+        .timeout(Duration::from_millis(timeout_ms));
+    if let Some(b) = body_bytes {
+        req = req.body(b);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| mlua::Error::external(format!("wrapper:http_request: {e}")))?;
+
+    let status = resp.status();
+    println!(
+        "[{}] HTTP {} {} -> {}",
+        plugin,
+        method_str.to_uppercase(),
+        url,
+        status.as_u16()
+    );
+
+    // response headers — http crate stores names lowercased already.
+    let resp_headers = lua.create_table()?;
+    for (name, value) in resp.headers().iter() {
+        let v = String::from_utf8_lossy(value.as_bytes()).to_string();
+        resp_headers.set(name.as_str(), v)?;
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| mlua::Error::external(format!("wrapper:http_request: reading body: {e}")))?;
+    let body_str = String::from_utf8_lossy(&bytes).to_string();
+
+    let result = lua.create_table()?;
+    result.set("status", status.as_u16())?;
+    result.set("ok", status.is_success())?;
+    result.set("headers", resp_headers)?;
+    result.set("body", body_str)?;
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -664,6 +840,7 @@ pub struct ServerApi {
     pub next_child_id: ChildIdCounter,
     pub cmd_tx: mpsc::Sender<String>,
     pub cron_jobs: CronJobList,
+    pub http_client: reqwest::Client,
 }
 
 impl UserData for ServerApi {
@@ -701,6 +878,7 @@ impl UserData for ServerApi {
                     next_child_id: this.next_child_id.clone(),
                     cmd_tx: this.cmd_tx.clone(),
                     cron_jobs: this.cron_jobs.clone(),
+                    http_client: this.http_client.clone(),
                 })
             },
         );
@@ -873,4 +1051,132 @@ pub fn reload_plugins(
     let count = plugins.lock().unwrap().len();
     println!("[MCRW] Reloaded {} plugins.", count);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // Minimal one-shot HTTP/1.1 server: accepts a single connection, echoes the
+    // request body back, and reports the method/content-type it saw via custom
+    // response headers. Returns the bound URL.
+    fn spawn_echo_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}/echo", addr);
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            // read until end of headers, tracking Content-Length
+            let mut content_len = 0usize;
+            loop {
+                let n = stream.read(&mut tmp).unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                    for line in head.lines() {
+                        if let Some(v) = line.strip_prefix("content-length:") {
+                            content_len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let body_start = pos + 4;
+                    while buf.len() - body_start < content_len {
+                        let n = stream.read(&mut tmp).unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let body = buf[body_start..body_start + content_len].to_vec();
+                    let resp = format!(
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(resp.as_bytes()).unwrap();
+                    stream.write_all(&body).unwrap();
+                    stream.flush().unwrap();
+                    break;
+                }
+            }
+        });
+        (url, handle)
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|w| w == needle)
+    }
+
+    #[tokio::test]
+    async fn http_request_json_roundtrip() {
+        let (url, handle) = spawn_echo_server();
+        let lua = Lua::new();
+        let client = reqwest::Client::new();
+
+        let opts = lua.create_table().unwrap();
+        opts.set("url", url).unwrap();
+        opts.set("method", "POST").unwrap();
+        let json = lua.create_table().unwrap();
+        json.set("hello", "world").unwrap();
+        json.set("n", 42).unwrap();
+        opts.set("json", json).unwrap();
+
+        let result = http_request_impl(lua.clone(), client, 5000, "test".into(), opts)
+            .await
+            .unwrap();
+
+        let status: u16 = result.get("status").unwrap();
+        let ok: bool = result.get("ok").unwrap();
+        let body: String = result.get("body").unwrap();
+        let headers: Table = result.get("headers").unwrap();
+        let ctype: String = headers.get("content-type").unwrap();
+
+        assert_eq!(status, 201);
+        assert!(ok);
+        assert_eq!(ctype, "application/json");
+        // body was JSON-encoded from the Lua table and echoed back verbatim
+        let parsed: JsonValue = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["hello"], "world");
+        assert_eq!(parsed["n"], 42);
+
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_request_rejects_body_and_json_together() {
+        let lua = Lua::new();
+        let client = reqwest::Client::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("url", "http://127.0.0.1:1/x").unwrap();
+        opts.set("body", "raw").unwrap();
+        let j = lua.create_table().unwrap();
+        opts.set("json", j).unwrap();
+
+        let err = http_request_impl(lua.clone(), client, 1000, "test".into(), opts)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("only one of"));
+    }
+
+    #[tokio::test]
+    async fn http_request_requires_url() {
+        let lua = Lua::new();
+        let client = reqwest::Client::new();
+        let opts = lua.create_table().unwrap();
+        let err = http_request_impl(lua.clone(), client, 1000, "test".into(), opts)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("url"));
+    }
 }
