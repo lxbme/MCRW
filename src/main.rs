@@ -16,12 +16,15 @@
 
 mod handler;
 mod lua_ctx;
+mod term;
 mod utils;
 
 use lua_ctx::TriggerList;
 use mlua::Lua;
+use rustyline::DefaultEditor;
 use std::collections::HashMap;
 use std::env;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
@@ -58,6 +61,33 @@ async fn main() {
     // init game command channel — created here (ahead of ServerApi) so the
     // sender can be cloned into ServerApi for the new wrapper:command API.
     let (tx, rx) = mpsc::channel::<String>(max_cmd_queue);
+
+    // Interactive console: when stdin/stdout are a real terminal, run an
+    // rustyline line editor (Up/Down history, line editing). Its ExternalPrinter
+    // is installed as the global `term` sink BEFORE plugins load or any output
+    // flows, so every wrapper/server log line prints above the live input line
+    // instead of clobbering it. Built here (ahead of ServerApi/load_plugins) for
+    // exactly that ordering; the editor itself is moved into its own thread
+    // later. When NOT a TTY (piped stdin, nohup, CI), we skip the editor and use
+    // the plain line reader, and the `term` macros fall back to println!.
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let mut console_editor: Option<DefaultEditor> = None;
+    if interactive {
+        match DefaultEditor::new() {
+            Ok(mut editor) => match editor.create_external_printer() {
+                Ok(printer) => {
+                    term::install(Box::new(printer));
+                    console_editor = Some(editor);
+                }
+                Err(e) => eprintln!(
+                    "[MCRW] [WARNING] external printer unavailable ({e}); console history disabled"
+                ),
+            },
+            Err(e) => eprintln!(
+                "[MCRW] [WARNING] line editor unavailable ({e}); console history disabled"
+            ),
+        }
+    }
 
     // Shared HTTP client for wrapper:http_request — built once so connections
     // are pooled and reused across plugins/calls. Survives !reload (lives on
@@ -122,8 +152,13 @@ async fn main() {
     // Command consumer
     handler::spawn_cmd_sender(rx, stdin);
 
-    // CMD producer: terminal stdin
-    handler::spawn_terminal_receiver(tx.clone(), ctl_tx);
+    // CMD producer: terminal stdin. Interactive → rustyline editor (history);
+    // otherwise → plain line reader (headless/piped). The editor gets the
+    // server's pid so a force-quit can SIGKILL the child instead of orphaning it.
+    match console_editor {
+        Some(editor) => handler::spawn_console_editor(editor, tx.clone(), ctl_tx, child.id()),
+        None => handler::spawn_terminal_receiver(tx.clone(), ctl_tx),
+    }
 
     // main loop producer
     handler::run_main_loop(

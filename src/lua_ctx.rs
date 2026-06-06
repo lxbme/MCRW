@@ -34,6 +34,8 @@ use serde_json::Value as JsonValue;
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
+use crate::tprintln;
+
 pub struct Trigger {
     pub regex: Regex,
     pub callback: RegistryKey,
@@ -389,7 +391,7 @@ impl UserData for PluginApi {
         );
 
         methods.add_method("log", |_lua: &Lua, this: &Self, msg: String| {
-            println!("[{}] {}", this.meta.name, msg);
+            tprintln!("[{}] {}", this.meta.name, msg);
             Ok(())
         });
 
@@ -417,7 +419,7 @@ impl UserData for PluginApi {
                     .join(&this.dirname)
                     .join("config.json");
                 let mut final_config: JsonValue = lua.from_value(default_cfg)?;
-                println!("{}", config_path.display());
+                tprintln!("{}", config_path.display());
 
                 if config_path.exists() {
                     // if exists: read config file
@@ -439,7 +441,7 @@ impl UserData for PluginApi {
                         mlua::Error::external(format!("Failed to write config: {}", e))
                     })?;
 
-                    println!("[{}] Created new config file.", this.meta.name);
+                    tprintln!("[{}] Created new config file.", this.meta.name);
                 }
                 let result_lua_value = lua.to_value(&final_config)?;
                 Ok(result_lua_value)
@@ -455,11 +457,11 @@ impl UserData for PluginApi {
             async move {
                 match tx.send(format!("{}\n", cmd)).await {
                     Ok(_) => {
-                        println!("[MCRW -> Server]: {}", cmd);
+                        tprintln!("[MCRW -> Server]: {}", cmd);
                         Ok(())
                     }
                     Err(_) => {
-                        println!("[MCRW] Fail to send cmd: {}", cmd);
+                        tprintln!("[MCRW] Fail to send cmd: {}", cmd);
                         Err(mlua::Error::external(
                             "wrapper:command: command queue closed (shutting down?)",
                         ))
@@ -750,7 +752,7 @@ async fn run_python_impl(
         let mut buf = String::new();
         let mut lines = BufReader::new(stderr_handle).lines();
         while let Ok(Some(l)) = lines.next_line().await {
-            println!("[{}][py] {}", plugin_name, l);
+            tprintln!("[{}][py] {}", plugin_name, l);
             buf.push_str(&l);
             buf.push('\n');
         }
@@ -1009,7 +1011,7 @@ pub fn reload_plugins(
     children: &ChildTracker,
     cron_jobs: &CronJobList,
 ) -> mlua::Result<()> {
-    println!("[MCRW] Reloading plugins...");
+    tprintln!("[MCRW] Reloading plugins...");
 
     // kill any in-flight python children before invalidating Lua state.
     // we do not await wait() — kill_on_drop(true) is the safety net.
@@ -1051,7 +1053,7 @@ pub fn reload_plugins(
     load_plugins(lua, plugins)?;
 
     let count = plugins.lock().unwrap().len();
-    println!("[MCRW] Reloaded {} plugins.", count);
+    tprintln!("[MCRW] Reloaded {} plugins.", count);
     Ok(())
 }
 
