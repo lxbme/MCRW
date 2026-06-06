@@ -146,6 +146,7 @@ impl Default for PythonConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HttpConfig {
     #[serde(default = "default_http_timeout_ms")]
+    #[warn(dead_code)]
     pub default_timeout_ms: u64,
 }
 fn default_http_timeout_ms() -> u64 {
@@ -210,8 +211,8 @@ fn builtin_trigger_config() -> TriggerConfig {
 
 pub fn load_trigger_config(path: &Path) -> TriggerConfig {
     let mut cfg = builtin_trigger_config();
-    match fs::read_to_string(path) {
-        Ok(s) => match toml::from_str::<TriggerConfig>(&s) {
+    if let Ok(s) = fs::read_to_string(path) {
+        match toml::from_str::<TriggerConfig>(&s) {
             Ok(user) => {
                 for (k, v) in user.events {
                     cfg.events.insert(k, v);
@@ -219,8 +220,7 @@ pub fn load_trigger_config(path: &Path) -> TriggerConfig {
                 println!("[MCRW] Loaded trigger_config.toml");
             }
             Err(e) => eprintln!("[MCRW] [ERROR] parse trigger_config.toml: {}", e),
-        },
-        Err(_) => {}
+        }
     }
     cfg
 }
@@ -312,7 +312,7 @@ impl UserData for PluginApi {
         methods.add_method(
             "register",
             |lua: &Lua, this: &Self, (pattern, func): (String, Function)| {
-                let regex = Regex::new(&pattern).map_err(|e| mlua::Error::external(e))?;
+                let regex = Regex::new(&pattern).map_err(mlua::Error::external)?;
                 let callback = lua.create_registry_value(func)?;
                 this.triggers
                     .lock()
@@ -433,7 +433,7 @@ impl UserData for PluginApi {
                 } else {
                     // if not exists: save default config
                     let json_str = serde_json::to_string_pretty(&final_config)
-                        .map_err(|e| mlua::Error::external(e))?;
+                        .map_err(mlua::Error::external)?;
 
                     fs::write(&config_path, json_str).map_err(|e| {
                         mlua::Error::external(format!("Failed to write config: {}", e))
@@ -803,8 +803,7 @@ async fn run_python_impl(
     // (j) parse last non-empty line of stdout as JSON. Empty stdout → null.
     let last_line = stdout_str
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .next_back()
+        .rfind(|l| !l.trim().is_empty())
         .unwrap_or("");
     let parsed: serde_json::Value = if last_line.is_empty() {
         serde_json::Value::Null
@@ -997,6 +996,9 @@ pub fn drain_due_cron_jobs(
     due
 }
 
+// Mirrors run_main_loop's signature: reload must clear every shared state list,
+// so it borrows each one explicitly rather than hiding them behind a struct.
+#[allow(clippy::too_many_arguments)]
 pub fn reload_plugins(
     lua: &Lua,
     triggers: &TriggerList,
