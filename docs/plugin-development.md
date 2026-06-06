@@ -25,6 +25,7 @@ Minecraft server JVM child process that the wrapper manages.
    2. [The `meta.toml` Manifest](#22-the-metatoml-manifest)
    3. [The `init.lua` Entry Point](#23-the-initlua-entry-point)
    4. [Module Resolution](#24-module-resolution)
+   5. [Editor Setup (IDE Autocomplete)](#25-editor-setup-ide-autocomplete)
 3. [The `wrapper` Handle](#3-the-wrapper-handle)
 4. [Event Subscription](#4-event-subscription)
    1. [Stdout Regex Triggers](#41-stdout-regex-triggers)
@@ -205,6 +206,40 @@ Modules from `lua_plugins/...` are loaded into Lua's `package.loaded`
 registry. On `!reload` (see [§7](#7-reloading)) the wrapper iterates this
 registry and nulls every key beginning with `lua_plugins`, forcing modules
 to be re-read from disk on the subsequent load.
+
+### 2.5. Editor Setup (IDE Autocomplete)
+
+MCRW ships type definitions for its entire Lua API so editors can offer
+autocomplete, inline documentation, and type checking while you write
+plugins. These work with the [Lua Language Server][luals] (the engine behind
+the VS Code **"Lua"** extension by sumneko, and available for Neovim, etc.).
+
+The definitions live in the version-controlled `tools/lua-types/` directory:
+
+| File                              | Purpose                                                              |
+|-----------------------------------|---------------------------------------------------------------------|
+| `tools/lua-types/mcrw.lua`        | `---@meta` definitions for `Server`, the `wrapper` handle, and all callback/data types. Documentation only — never executed at runtime. |
+| `tools/lua-types/luarc.example.json` | A template `.luarc.json` to copy into your plugin workspace.      |
+| `tools/lua-types/README.md`       | Setup walkthrough.                                                  |
+
+**To use it**, open your plugins directory (e.g. `server/lua_plugins/`) as your
+editor's workspace root, install the Lua Language Server, and add a
+`.luarc.json` there whose `workspace.library` points at `tools/lua-types`
+(from `server/lua_plugins/` that is `../../tools/lua-types`). This repo already
+ships that local config at `server/lua_plugins/.luarc.json`. You then get, for
+example:
+
+* completion and signatures on `wrapper:` (e.g. `register`, `register_cron`,
+  `run_python`),
+* hover docs explaining each method's arguments and return values,
+* a warning if you pass the wrong type or call a method that does not exist.
+
+The `wrapper` variable is typed automatically because
+`Server:get_context(...)` is annotated to return the `wrapper` handle. The
+definitions track the Rust API in `src/lua_ctx.rs`; if you extend the API,
+update `tools/lua-types/mcrw.lua` to match.
+
+[luals]: https://luals.github.io/
 
 ---
 

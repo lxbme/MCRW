@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime.version": "Lua 5.4",
+  "runtime.path": [
+    "?.lua",
+    "?/init.lua"
+  ],
+  "workspace.library": [
+    "/absolute/path/to/mc_wrapper/tools/lua-types"
+  ],
+  "workspace.checkThirdParty": false,
+  "diagnostics.globals": [
+    "Server"
+  ]
+}
