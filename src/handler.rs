@@ -32,7 +32,7 @@ pub fn spawn_cmd_sender(mut rx: mpsc::Receiver<String>, mut mc_stdin: tokio::pro
     // server commands.
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
-            let stripped = cmd.trim_end_matches(|c| c == '\n' || c == '\r');
+            let stripped = cmd.trim_end_matches(['\n', '\r']);
             let sanitized: String = stripped
                 .chars()
                 .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
@@ -72,6 +72,11 @@ pub fn spawn_terminal_receiver(tx: mpsc::Sender<String>, ctl_tx: mpsc::Sender<Co
     });
 }
 
+// The main loop is the single owner that threads every piece of shared wrapper
+// state (trigger lists, registries, cron jobs, channels) into the select! loop.
+// Bundling them into a context struct would only move the same fields elsewhere,
+// so we accept the wide signature here.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_main_loop(
     mc_stdout: tokio::process::ChildStdout,
     tx: mpsc::Sender<String>,
