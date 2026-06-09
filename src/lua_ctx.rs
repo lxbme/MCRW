@@ -330,7 +330,58 @@ pub struct McrwConfig {
     pub rcon: RconConfig,
 }
 
+// Default mcrw.toml written on first run (when none exists), so users get a
+// documented starting point instead of having to hand-copy it from the docs.
+// Every value shown equals the built-in default; optional override fields are
+// commented out. Keep in sync with the config structs above and docs §5.2.
+const DEFAULT_MCRW_TOML: &str = r#"# mcrw.toml — MCRW wrapper configuration.
+# Auto-generated with default values on first run. Edit and restart to apply.
+# Every value below is optional and falls back to the built-in default shown.
+
+[python]
+interpreter        = "python3"   # Path or PATH-lookup name for the Python interpreter
+default_timeout_ms = 30000       # Default per-call timeout for wrapper:run_python
+
+[http]
+default_timeout_ms = 30000       # Default per-request timeout for wrapper:http_request
+
+[players]
+enabled        = true            # Master switch for the player registry
+pos_timeout_ms = 3000            # Stdio-fallback timeout for p:pos()/p:dimension()
+# Optional Rust-regex overrides for non-vanilla server flavors. Omit to use the
+# built-in vanilla defaults. Capture groups must match the documented order.
+# join_pattern  = '...'          # captures: name
+# leave_pattern = '...'          # captures: name
+# login_pattern = '...'          # captures: name, ip
+# uuid_pattern  = '...'          # captures: name, uuid
+# pos_pattern   = '...'          # captures: name, x, y, z
+# dim_pattern   = '...'          # captures: name, dim
+
+[rcon]
+# RCON is auto-detected from server.properties; this section only overrides it.
+# enabled  = true                # Omit to auto-detect from server.properties' enable-rcon
+# host     = "127.0.0.1"
+# port     = 25575               # Omit to use server.properties' rcon.port
+# password = "..."               # Omit to use server.properties' rcon.password
+timeout_ms = 5000                # Per-call timeout for wrapper:rcon_command
+"#;
+
 pub fn load_mcrw_config(path: &Path) -> Arc<McrwConfig> {
+    if !path.exists() {
+        // First run: write a documented default so the file is discoverable and
+        // editable. A write failure (e.g. read-only dir) is non-fatal — we just
+        // run on built-in defaults.
+        match fs::write(path, DEFAULT_MCRW_TOML) {
+            Ok(_) => println!(
+                "[MCRW] No mcrw.toml found; wrote a default to {}",
+                path.display()
+            ),
+            Err(e) => eprintln!(
+                "[MCRW] [WARNING] could not write default mcrw.toml ({e}); using built-in defaults"
+            ),
+        }
+        return Arc::new(McrwConfig::default());
+    }
     match fs::read_to_string(path) {
         Ok(s) => match toml::from_str::<McrwConfig>(&s) {
             Ok(cfg) => {
@@ -342,7 +393,10 @@ pub fn load_mcrw_config(path: &Path) -> Arc<McrwConfig> {
                 Arc::new(McrwConfig::default())
             }
         },
-        Err(_) => Arc::new(McrwConfig::default()),
+        Err(e) => {
+            eprintln!("[MCRW] [ERROR] read mcrw.toml: {e} (using defaults)");
+            Arc::new(McrwConfig::default())
+        }
     }
 }
 
@@ -371,8 +425,45 @@ fn builtin_trigger_config() -> TriggerConfig {
     TriggerConfig { events }
 }
 
+// Default trigger_config.toml written on first run. Intentionally all-comments:
+// the built-in "start" pattern always applies, so an empty file changes nothing —
+// this just documents the format and the override knobs for discoverability.
+const DEFAULT_TRIGGER_CONFIG_TOML: &str = r#"# trigger_config.toml — lifecycle event patterns for MCRW.
+#
+# Each key is an event name; its value is a list of stdout regex patterns (Rust
+# regex syntax) that fire the event. The wrapper ships a built-in "start" pattern
+# matching the vanilla "Done (..s)! For help" line, so this file is OPTIONAL —
+# define an event here only to OVERRIDE a built-in or ADD a new one.
+#
+# `once = true` (the default) fires the event at most once per server run.
+#
+# Example — override the start pattern, and add a custom event:
+#
+# [[start]]
+# text = 'Done \([0-9.]+s\)! For help'
+# once = true
+#
+# [[custom_event]]
+# text = 'Some other log line'
+# once = false
+"#;
+
 pub fn load_trigger_config(path: &Path) -> TriggerConfig {
     let mut cfg = builtin_trigger_config();
+    if !path.exists() {
+        // First run: drop a documented template (all comments → no behavior
+        // change; the built-in patterns below still apply).
+        match fs::write(path, DEFAULT_TRIGGER_CONFIG_TOML) {
+            Ok(_) => println!(
+                "[MCRW] No trigger_config.toml found; wrote a default to {}",
+                path.display()
+            ),
+            Err(e) => eprintln!(
+                "[MCRW] [WARNING] could not write default trigger_config.toml ({e}); using built-ins"
+            ),
+        }
+        return cfg;
+    }
     if let Ok(s) = fs::read_to_string(path) {
         match toml::from_str::<TriggerConfig>(&s) {
             Ok(user) => {
@@ -1443,5 +1534,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("url"));
+    }
+
+    // The generated default mcrw.toml must parse, and its values must equal the
+    // built-in defaults (so writing it on first run never silently changes
+    // behavior vs. having no file).
+    #[test]
+    fn default_mcrw_toml_matches_defaults() {
+        let parsed: McrwConfig = toml::from_str(DEFAULT_MCRW_TOML).expect("default mcrw.toml parses");
+        let def = McrwConfig::default();
+        assert_eq!(parsed.python.interpreter, def.python.interpreter);
+        assert_eq!(parsed.python.default_timeout_ms, def.python.default_timeout_ms);
+        assert_eq!(parsed.http.default_timeout_ms, def.http.default_timeout_ms);
+        assert_eq!(parsed.players.enabled, def.players.enabled);
+        assert_eq!(parsed.players.pos_timeout_ms, def.players.pos_timeout_ms);
+        assert!(parsed.players.join_pattern.is_none());
+        assert_eq!(parsed.rcon.enabled, def.rcon.enabled);
+        assert_eq!(parsed.rcon.host, def.rcon.host);
+        assert_eq!(parsed.rcon.port, def.rcon.port);
+        assert_eq!(parsed.rcon.timeout_ms, def.rcon.timeout_ms);
+    }
+
+    // The generated trigger_config.toml is all-comments, so it parses to an empty
+    // event set — load merges nothing and the built-ins remain authoritative.
+    #[test]
+    fn default_trigger_config_is_inert() {
+        let parsed: TriggerConfig =
+            toml::from_str(DEFAULT_TRIGGER_CONFIG_TOML).expect("default trigger_config.toml parses");
+        assert!(parsed.events.is_empty());
+    }
+
+    // load_mcrw_config writes a default when the file is missing, then a second
+    // call reads it back successfully (idempotent, no second write needed).
+    #[test]
+    fn load_mcrw_config_generates_then_reads() {
+        let path = std::env::temp_dir().join("mcrw_cfg_gen_test.toml");
+        let _ = fs::remove_file(&path);
+        assert!(!path.exists());
+        let _ = load_mcrw_config(&path);
+        assert!(path.exists(), "default file written on first run");
+        let written = fs::read_to_string(&path).unwrap();
+        assert_eq!(written, DEFAULT_MCRW_TOML);
+        // Second run reads the existing file without error.
+        let _ = load_mcrw_config(&path);
+        let _ = fs::remove_file(&path);
     }
 }

@@ -786,10 +786,18 @@ pos_timeout_ms = 3000            # Stdio-fallback timeout for p:pos()/p:dimensio
 timeout_ms = 5000                # Per-call timeout for wrapper:rcon_command (§4.9)
 ```
 
-The file is optional. When absent, all values default as shown above.
-Plugins MAY NOT modify `mcrw.toml` at runtime; it is read once at start-up
-and once on `!reload`. See [Appendix B](#appendix-b--configuration-file-schemas)
-for the full schema.
+The file is optional. **On first run, if `mcrw.toml` is not found, the wrapper
+writes the commented default above to the working directory** so you have a
+documented starting point to edit — you do not need to create it by hand. (If the
+directory is not writable, the wrapper logs a warning and runs on the built-in
+defaults.) Editing it then requires a restart; values fall back to the defaults
+shown when omitted. Plugins MAY NOT modify `mcrw.toml` at runtime; it is read once
+at start-up and once on `!reload`. See
+[Appendix B](#appendix-b--configuration-file-schemas) for the full schema.
+
+`trigger_config.toml` (§4.3) is auto-generated the same way — as an all-comments
+template, since the built-in lifecycle patterns already apply when the file is
+empty.
 
 ---
 
