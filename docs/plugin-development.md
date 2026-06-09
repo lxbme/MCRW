@@ -631,6 +631,36 @@ to a timeout (default 3000 ms, see `[players].pos_timeout_ms`). Check
 > whose join/leave/login lines differ, override them under `[players]` in
 > `mcrw.toml` (§5.2).
 
+### 4.9. Arbitrary RCON Commands
+
+When RCON is available you can run **any** server command and capture its output
+— something `wrapper:command()` (fire-and-forget to stdin) cannot do:
+
+```lua
+if wrapper:is_rcon() then
+    local list = wrapper:rcon_command("list")     -- "There are 2 of 20 players: ..."
+    local seed = wrapper:rcon_command("seed")
+end
+```
+
+`wrapper:rcon_command(cmd)` yields until the response arrives and returns it as a
+string. It **raises** a Lua error if RCON is not enabled, not connected, or the
+call exceeds `[rcon].timeout_ms` (default 5000 ms) — guard with
+`wrapper:is_rcon()` or wrap in `pcall`:
+
+```lua
+local ok, out = pcall(function() return wrapper:rcon_command("list") end)
+if not ok then wrapper:log("rcon failed: " .. tostring(out)) end
+```
+
+This grants no new privilege over `wrapper:command()` (plugins can already send
+any command); it only adds the return value.
+
+> **Caveat.** RCON commands are processed one at a time on a single connection.
+> A genuinely wedged server command blocks subsequent RCON queries (including
+> `pos()`/`dimension()`) until it returns or the connection drops; the per-call
+> timeout frees your plugin coroutine but not the shared connection.
+
 ---
 
 ## 5. Plugin Configuration
@@ -701,6 +731,7 @@ pos_timeout_ms = 3000            # Stdio-fallback timeout for p:pos()/p:dimensio
 # host     = "127.0.0.1"
 # port     = 25575               # Omit to use server.properties' rcon.port
 # password = "..."               # Omit to use server.properties' rcon.password
+timeout_ms = 5000                # Per-call timeout for wrapper:rcon_command (§4.9)
 ```
 
 The file is optional. When absent, all values default as shown above.

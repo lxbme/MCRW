@@ -366,11 +366,6 @@ impl PlayerRegistry {
         }
     }
 
-    /// Whether a live RCON connection currently backs the active-query path.
-    pub fn is_rcon(&self) -> bool {
-        self.rcon.as_ref().map(|h| h.is_connected()).unwrap_or(false)
-    }
-
     fn is_online(&self, name: &str) -> bool {
         self.inner
             .lock()
