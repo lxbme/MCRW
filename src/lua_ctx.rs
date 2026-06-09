@@ -38,6 +38,7 @@ use tokio::sync::mpsc;
 
 use crate::players::PlayerRegistry;
 use crate::rcon::RconHandle;
+use crate::store::{StoreHandle, StoreRegistry};
 use crate::tprintln;
 
 pub struct Trigger {
@@ -470,6 +471,7 @@ pub struct PluginApi {
     join_triggers: PlayerCallbackList,
     leave_triggers: PlayerCallbackList,
     rcon: Option<RconHandle>,
+    store: Arc<StoreRegistry>,
 }
 
 impl UserData for PluginApi {
@@ -576,6 +578,19 @@ impl UserData for PluginApi {
         // True when a live RCON connection backs the active-query path.
         methods.add_method("is_rcon", |_lua: &Lua, this: &Self, ()| {
             Ok(this.rcon.as_ref().map(|h| h.is_connected()).unwrap_or(false))
+        });
+
+        // Persistent KV store handle. No argument → this plugin's private
+        // namespace ("plugin:<dirname>"); a name → a shared namespace
+        // ("shared:<name>") for cross-plugin data. Data survives !reload and
+        // restarts (.mcrw/store.json). See StoreHandle for the get/set/delete/
+        // keys/flush methods.
+        methods.add_method("store", |_lua: &Lua, this: &Self, ns: Option<String>| {
+            let namespace = match ns {
+                Some(n) => format!("shared:{n}"),
+                None => format!("plugin:{}", this.dirname),
+            };
+            Ok(StoreHandle::new(this.store.clone(), namespace))
         });
 
         // Run an arbitrary command over RCON and return its output. Raises if
@@ -1076,6 +1091,7 @@ pub struct ServerApi {
     pub join_triggers: PlayerCallbackList,
     pub leave_triggers: PlayerCallbackList,
     pub rcon: Option<RconHandle>,
+    pub store: Arc<StoreRegistry>,
 }
 
 impl UserData for ServerApi {
@@ -1118,6 +1134,7 @@ impl UserData for ServerApi {
                     join_triggers: this.join_triggers.clone(),
                     leave_triggers: this.leave_triggers.clone(),
                     rcon: this.rcon.clone(),
+                    store: this.store.clone(),
                 })
             },
         );

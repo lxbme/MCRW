@@ -18,6 +18,7 @@ mod handler;
 mod lua_ctx;
 mod players;
 mod rcon;
+mod store;
 mod term;
 mod utils;
 
@@ -91,6 +92,11 @@ async fn main() {
     let join_triggers: PlayerCallbackList = Arc::new(Mutex::new(Vec::new()));
     let leave_triggers: PlayerCallbackList = Arc::new(Mutex::new(Vec::new()));
 
+    // Persistent KV store for plugins (wrapper:store). Loaded once, shared, and —
+    // like the player registry and HTTP client — held on the persistent Server
+    // global so stored data survives !reload. Flushed on shutdown (below).
+    let store = Arc::new(store::StoreRegistry::new(PathBuf::from(".mcrw/store.json")));
+
     // Interactive console: when stdin/stdout are a real terminal, run an
     // rustyline line editor (Up/Down history, line editing). Its ExternalPrinter
     // is installed as the global `term` sink BEFORE plugins load or any output
@@ -142,6 +148,7 @@ async fn main() {
         join_triggers: join_triggers.clone(),
         leave_triggers: leave_triggers.clone(),
         rcon: rcon_handle,
+        store: store.clone(),
     };
     lua.globals()
         .set("Server", server_api)
@@ -220,6 +227,7 @@ async fn main() {
         stop_triggers.clone(),
         crash_triggers.clone(),
         player_registry.clone(),
+        store.clone(),
     )
     .await;
 }

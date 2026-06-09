@@ -661,6 +661,58 @@ any command); it only adds the return value.
 > `pos()`/`dimension()`) until it returns or the connection drops; the per-call
 > timeout frees your plugin coroutine but not the shared connection.
 
+### 4.10. Persistent Key-Value Store
+
+`config.json` (§5.1) is for user-tunable settings; it is not meant for mutable
+runtime data your plugin writes back (player homes, balances, leaderboards).
+For that, use **`wrapper:store`** — a persistent key-value store that survives
+`!reload` and restarts (backed by `.mcrw/store.json`).
+
+`wrapper:store([namespace])` returns a **store handle** bound to one namespace:
+
+```lua
+local db = wrapper:store()            -- this plugin's PRIVATE namespace
+db:set("homes.bed", { x = 1, y = 64, z = -200 })
+local home = db:get("homes.bed")      -- tables round-trip
+db:delete("homes.bed")
+for _, key in ipairs(db:keys()) do ... end
+```
+
+**Namespaces.** With no argument you get a namespace private to your plugin —
+no other plugin can read or clobber it. Pass a **name** to open a *shared*
+namespace that any plugin can reach by the same name, for deliberate cross-plugin
+data:
+
+```lua
+-- A bank plugin and a shop plugin sharing one balance ledger:
+local econ = wrapper:store("economy")
+econ:set("Steve.balance", 100)
+```
+
+Private and shared spaces never collide (they are stored under distinct
+`plugin:<dir>` / `shared:<name>` keys internally).
+
+**Values** may be any JSON-serialisable Lua value — strings, numbers, booleans,
+and (nested) tables. **Keys** are a flat string keyspace: `"homes.bed"` is one
+opaque key, not a nested path. Setting a key to `nil` deletes it (so
+`db:set(k, nil)` and `db:delete(k)` are equivalent), and `db:get` returns `nil`
+for an absent key.
+
+**Durability.** Writes are auto-saved within ~5 s (debounced) and flushed on
+shutdown, so you normally never call save logic yourself. For a critical update
+that must not be lost on a crash, force an immediate **atomic** write:
+
+```lua
+econ:set("Steve.balance", balance - cost)
+econ:set("Alex.balance",  other + cost)
+econ:flush()                          -- persist the transfer now
+```
+
+> **Note.** The store is in-memory with periodic persistence — reads and writes
+> are cheap. It is a key-value store, not a query engine: to scan or filter,
+> iterate `keys()` and `get()` yourself. For large or relational data, keep using
+> an external store via `wrapper:http_request` or `wrapper:run_python`.
+
 ---
 
 ## 5. Plugin Configuration
