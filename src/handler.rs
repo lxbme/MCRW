@@ -29,6 +29,7 @@ use crate::lua_ctx::{
     PlayerHandle, PluginRegistry, StopTriggerList, TriggerList,
 };
 use crate::players::{PlayerEvent, PlayerRegistry};
+use crate::store::StoreRegistry;
 
 pub fn spawn_cmd_sender(mut rx: mpsc::Receiver<String>, mut mc_stdin: tokio::process::ChildStdin) {
     // Forwards channel-supplied commands to the Minecraft server's stdin, one
@@ -425,13 +426,16 @@ pub async fn check_shutdown(
     stop_triggers: StopTriggerList,
     crash_triggers: CrashTriggerList,
     player_registry: Arc<PlayerRegistry>,
+    store: Arc<StoreRegistry>,
 ) {
     match child.wait().await {
         Ok(status) => {
             // The server is gone — no leave lines will arrive. Mark everyone
             // offline (refreshing last_seen) and flush before plugin callbacks run.
+            // Persist any debounced store writes too while we're shutting down.
             player_registry.mark_all_offline();
             player_registry.flush();
+            store.flush();
             if status.success() {
                 println!("[MCRW] Minecraft server stopped gracefully (Exit Code: 0).");
                 let funcs: Vec<Function> = {

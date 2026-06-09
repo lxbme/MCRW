@@ -118,6 +118,40 @@ function Player:dimension() end
 --- of commands to run.
 ---@alias mcrw.PlayerCallback fun(player: mcrw.Player): mcrw.Commands
 
+--- A persistent key-value store handle, bound to one namespace and returned by
+--- `wrapper:store([namespace])`. Each namespace is a flat `string -> value` map
+--- (a key like `"homes.bed"` is one opaque key, not a nested path). Values may be
+--- any JSON-serialisable Lua value (strings, numbers, booleans, and tables).
+--- Data is persisted to `.mcrw/store.json` and survives `!reload` and restarts.
+---@class mcrw.Store
+local Store = {}
+
+--- Read `key` from this namespace. Returns the stored value (tables come back as
+--- tables), or nil if the key is absent.
+---@param key string
+---@return any|nil
+function Store:get(key) end
+
+--- Write `value` under `key`. Passing `nil` deletes the key (so `set(k, nil)`
+--- and `delete(k)` are equivalent). The write is auto-saved within ~5s; call
+--- `flush()` to persist immediately.
+---@param key string
+---@param value any  Any JSON-serialisable value, or nil to delete.
+function Store:set(key, value) end
+
+--- Delete `key` from this namespace (no-op if absent).
+---@param key string
+function Store:delete(key) end
+
+--- List the keys currently present in this namespace (unordered).
+---@return string[]
+function Store:keys() end
+
+--- Force an immediate durable write of pending changes, bypassing the ~5s
+--- debounce. Use after a critical update (e.g. an economy transfer) that must not
+--- be lost on a crash. Writes are atomic (temp file + rename).
+function Store:flush() end
+
 --------------------------------------------------------------------------------
 -- The `wrapper` handle (per-plugin), returned by `Server:get_context`.
 --------------------------------------------------------------------------------
@@ -202,6 +236,25 @@ function Wrapper:is_rcon() end
 ---@param cmd string  The server command to run (no leading slash).
 ---@return string     The command's output text.
 function Wrapper:rcon_command(cmd) end
+
+--- Open a persistent key-value store handle. With no argument you get this
+--- plugin's PRIVATE namespace (isolated from every other plugin). Pass a name to
+--- open a SHARED namespace that any plugin can reach by the same name — use this
+--- for cross-plugin data (e.g. an "economy" balance read by both a bank and a
+--- shop plugin). Stored data survives `!reload` and restarts.
+---
+--- ```lua
+--- local db = wrapper:store()            -- private to this plugin
+--- db:set("homes.bed", { x = 1, y = 2, z = 3 })
+--- local home = db:get("homes.bed")
+---
+--- local econ = wrapper:store("economy") -- shared across plugins
+--- econ:set("Steve.balance", 100)
+--- econ:flush()                          -- persist now (don't risk the ~5s debounce)
+--- ```
+---@param namespace? string  Shared namespace name; omit for this plugin's private store.
+---@return mcrw.Store
+function Wrapper:store(namespace) end
 
 --- Push a single command to the server immediately, without waiting for the
 --- current callback to return. Use this to emit commands from outside a
