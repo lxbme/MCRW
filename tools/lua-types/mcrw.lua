@@ -188,6 +188,21 @@ function Wrapper:player(name) end
 ---@return boolean
 function Wrapper:is_rcon() end
 
+--- Run an arbitrary command over RCON and return its output text. Unlike
+--- `wrapper:command` (fire-and-forget to stdin), this captures the response.
+--- Yields until the response arrives. RAISES a Lua error if RCON is not enabled,
+--- not connected, or the call exceeds `[rcon].timeout_ms` (default 5000) — guard
+--- with `wrapper:is_rcon()` or wrap in `pcall`.
+---
+--- ```lua
+--- if wrapper:is_rcon() then
+---   local players = wrapper:rcon_command("list")
+--- end
+--- ```
+---@param cmd string  The server command to run (no leading slash).
+---@return string     The command's output text.
+function Wrapper:rcon_command(cmd) end
+
 --- Push a single command to the server immediately, without waiting for the
 --- current callback to return. Use this to emit commands from outside a
 --- trigger return value (e.g. between awaited steps). Yields if the command

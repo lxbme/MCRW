@@ -37,6 +37,7 @@ use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use crate::players::PlayerRegistry;
+use crate::rcon::RconHandle;
 use crate::tprintln;
 
 pub struct Trigger {
@@ -295,9 +296,14 @@ pub struct RconConfig {
     pub port: Option<u16>,
     #[serde(default)]
     pub password: Option<String>,
+    #[serde(default = "default_rcon_timeout_ms")]
+    pub timeout_ms: u64,
 }
 fn default_rcon_host() -> String {
     "127.0.0.1".into()
+}
+fn default_rcon_timeout_ms() -> u64 {
+    5_000
 }
 impl Default for RconConfig {
     fn default() -> Self {
@@ -306,6 +312,7 @@ impl Default for RconConfig {
             host: default_rcon_host(),
             port: None,
             password: None,
+            timeout_ms: default_rcon_timeout_ms(),
         }
     }
 }
@@ -462,6 +469,7 @@ pub struct PluginApi {
     player_registry: Arc<PlayerRegistry>,
     join_triggers: PlayerCallbackList,
     leave_triggers: PlayerCallbackList,
+    rcon: Option<RconHandle>,
 }
 
 impl UserData for PluginApi {
@@ -567,7 +575,33 @@ impl UserData for PluginApi {
 
         // True when a live RCON connection backs the active-query path.
         methods.add_method("is_rcon", |_lua: &Lua, this: &Self, ()| {
-            Ok(this.player_registry.is_rcon())
+            Ok(this.rcon.as_ref().map(|h| h.is_connected()).unwrap_or(false))
+        });
+
+        // Run an arbitrary command over RCON and return its output. Raises if
+        // RCON is not enabled, not connected, or the call times out
+        // ([rcon].timeout_ms, default 5000). Unlike wrapper:command (fire-and-
+        // forget to stdin), this captures the command's response text.
+        methods.add_async_method("rcon_command", |_lua, this, cmd: String| {
+            let handle = this.rcon.clone();
+            let timeout_ms = this.mcrw_config.rcon.timeout_ms;
+            async move {
+                let handle = handle.ok_or_else(|| {
+                    mlua::Error::external(
+                        "wrapper:rcon_command: RCON is not enabled (set enable-rcon in server.properties or [rcon] in mcrw.toml)",
+                    )
+                })?;
+                let dur = std::time::Duration::from_millis(timeout_ms);
+                match tokio::time::timeout(dur, handle.command(&cmd)).await {
+                    Ok(Some(resp)) => Ok(resp),
+                    Ok(None) => Err(mlua::Error::external(
+                        "wrapper:rcon_command: RCON not connected (check wrapper:is_rcon())",
+                    )),
+                    Err(_) => Err(mlua::Error::external(format!(
+                        "wrapper:rcon_command: timed out after {timeout_ms}ms"
+                    ))),
+                }
+            }
         });
 
         methods.add_method(
@@ -1041,6 +1075,7 @@ pub struct ServerApi {
     pub player_registry: Arc<PlayerRegistry>,
     pub join_triggers: PlayerCallbackList,
     pub leave_triggers: PlayerCallbackList,
+    pub rcon: Option<RconHandle>,
 }
 
 impl UserData for ServerApi {
@@ -1082,6 +1117,7 @@ impl UserData for ServerApi {
                     player_registry: this.player_registry.clone(),
                     join_triggers: this.join_triggers.clone(),
                     leave_triggers: this.leave_triggers.clone(),
+                    rcon: this.rcon.clone(),
                 })
             },
         );

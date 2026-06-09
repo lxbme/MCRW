@@ -68,19 +68,24 @@ async fn main() {
     // Player registry: parses join/leave from stdout, answers pos()/dimension()
     // live queries (via cmd_tx), and persists cross-session fields to
     // .mcrw/players.json. Shared between the dispatch loop and the Lua context.
+    // RCON is detected, never assumed: only spawn a handle when server.properties
+    // (or an [rcon] override) actually enables it. The connection itself is lazy.
+    // One handle is shared by the player registry (pos/dimension) and the Lua
+    // wrapper:rcon_command API.
+    let rcon_handle = rcon::resolve_settings(&mcrw_config.rcon).map(|info| {
+        println!(
+            "[MCRW] RCON enabled (target {}:{}); live queries will prefer RCON.",
+            info.host, info.port
+        );
+        rcon::RconHandle::spawn(info)
+    });
     let mut registry = PlayerRegistry::new(
         &mcrw_config.players,
         tx.clone(),
         PathBuf::from(".mcrw/players.json"),
     );
-    // RCON is detected, never assumed: only attach a handle when server.properties
-    // (or an [rcon] override) actually enables it. The connection itself is lazy.
-    if let Some(info) = rcon::resolve_settings(&mcrw_config.rcon) {
-        println!(
-            "[MCRW] RCON enabled (target {}:{}); live queries will prefer RCON.",
-            info.host, info.port
-        );
-        registry.set_rcon(rcon::RconHandle::spawn(info));
+    if let Some(h) = &rcon_handle {
+        registry.set_rcon(h.clone());
     }
     let player_registry = Arc::new(registry);
     let join_triggers: PlayerCallbackList = Arc::new(Mutex::new(Vec::new()));
@@ -136,6 +141,7 @@ async fn main() {
         player_registry: player_registry.clone(),
         join_triggers: join_triggers.clone(),
         leave_triggers: leave_triggers.clone(),
+        rcon: rcon_handle,
     };
     lua.globals()
         .set("Server", server_api)

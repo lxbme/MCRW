@@ -289,6 +289,43 @@ mod tests {
         addr
     }
 
+    // Like spawn_mock_rcon but completes auth (so the client connects) then
+    // ignores ExecCommand packets — the command never gets a reply, exercising
+    // the caller-side timeout path.
+    async fn spawn_mock_rcon_silent_exec() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            loop {
+                let mut lenb = [0u8; 4];
+                if sock.read_exact(&mut lenb).await.is_err() {
+                    break;
+                }
+                let length = i32::from_le_bytes(lenb) as usize;
+                let mut rest = vec![0u8; length];
+                if sock.read_exact(&mut rest).await.is_err() {
+                    break;
+                }
+                let id = i32::from_le_bytes(rest[0..4].try_into().unwrap());
+                let ptype = i32::from_le_bytes(rest[4..8].try_into().unwrap());
+                if ptype != 3 {
+                    continue; // swallow ExecCommand → never reply
+                }
+                // Auth -> AuthResponse (echo id => success)
+                let mut out = Vec::new();
+                out.extend_from_slice(&10i32.to_le_bytes());
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&2i32.to_le_bytes());
+                out.extend_from_slice(&[0u8, 0u8]);
+                if sock.write_all(&out).await.is_err() {
+                    break;
+                }
+            }
+        });
+        addr
+    }
+
     async fn wait_connected(h: &RconHandle) -> bool {
         for _ in 0..200 {
             if h.is_connected() {
@@ -330,5 +367,21 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(!handle.is_connected());
         assert!(handle.command("anything").await.is_none());
+    }
+
+    // Connected, but the server never replies to the command: the caller-side
+    // timeout that wrapper:rcon_command applies must fire (here demonstrated by
+    // wrapping command() in tokio::time::timeout, exactly as the Lua method does).
+    #[tokio::test]
+    async fn command_times_out_when_server_silent() {
+        let addr = spawn_mock_rcon_silent_exec().await;
+        let handle = RconHandle::spawn(RconConnectInfo {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            password: "secret".into(),
+        });
+        assert!(wait_connected(&handle).await, "auth succeeds → connected");
+        let r = tokio::time::timeout(Duration::from_millis(150), handle.command("list")).await;
+        assert!(r.is_err(), "silent server → caller-side timeout elapses");
     }
 }
