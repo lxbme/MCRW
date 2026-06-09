@@ -27,13 +27,16 @@ use std::{
 };
 
 use mlua::LuaSerdeExt;
-use mlua::{Function, Lua, RegistryKey, Table, UserData, UserDataMethods, Value};
+use mlua::{
+    Function, Lua, RegistryKey, Table, UserData, UserDataFields, UserDataMethods, Value,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
+use crate::players::PlayerRegistry;
 use crate::tprintln;
 
 pub struct Trigger {
@@ -67,6 +70,80 @@ pub type TriggerList = Arc<Mutex<Vec<Trigger>>>;
 pub type StopTriggerList = Arc<Mutex<Vec<StopTrigger>>>;
 pub type CrashTriggerList = Arc<Mutex<Vec<CrashTrigger>>>;
 pub type CronJobList = Arc<Mutex<Vec<CronJob>>>;
+// register_on_join / register_on_leave callbacks (plain RegistryKeys, fired by
+// the dispatch loop with a PlayerHandle argument).
+pub type PlayerCallbackList = Arc<Mutex<Vec<RegistryKey>>>;
+
+// A per-player handle handed to Lua by `wrapper:players()` / `wrapper:player()`
+// and to join/leave callbacks. Static fields read the current cached record;
+// `pos()` / `dimension()` fetch live data on demand.
+#[derive(Clone)]
+pub struct PlayerHandle {
+    registry: Arc<PlayerRegistry>,
+    name: String,
+}
+
+impl PlayerHandle {
+    pub fn new(registry: Arc<PlayerRegistry>, name: String) -> Self {
+        Self { registry, name }
+    }
+}
+
+impl UserData for PlayerHandle {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("name", |_, this| Ok(this.name.clone()));
+        fields.add_field_method_get("uuid", |_, this| {
+            Ok(this.registry.snapshot(&this.name).and_then(|r| r.uuid))
+        });
+        fields.add_field_method_get("ip", |_, this| {
+            Ok(this.registry.snapshot(&this.name).and_then(|r| r.ip))
+        });
+        fields.add_field_method_get("online", |_, this| {
+            Ok(this
+                .registry
+                .snapshot(&this.name)
+                .map(|r| r.online)
+                .unwrap_or(false))
+        });
+        fields.add_field_method_get("first_join", |_, this| {
+            Ok(this.registry.snapshot(&this.name).and_then(|r| r.first_join))
+        });
+        fields.add_field_method_get("last_seen", |_, this| {
+            Ok(this
+                .registry
+                .snapshot(&this.name)
+                .map(|r| r.last_seen)
+                .unwrap_or(0))
+        });
+        fields.add_field_method_get("join_time", |_, this| {
+            Ok(this.registry.snapshot(&this.name).and_then(|r| r.join_time))
+        });
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_async_method("pos", |lua, this, ()| {
+            let reg = this.registry.clone();
+            let name = this.name.clone();
+            async move {
+                match reg.query_pos(&name).await {
+                    Some(p) => {
+                        let t = lua.create_table()?;
+                        t.set("x", p.x)?;
+                        t.set("y", p.y)?;
+                        t.set("z", p.z)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => Ok(Value::Nil),
+                }
+            }
+        });
+        methods.add_async_method("dimension", |_lua, this, ()| {
+            let reg = this.registry.clone();
+            let name = this.name.clone();
+            async move { Ok(reg.query_dimension(&name).await) }
+        });
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMeta {
@@ -162,12 +239,87 @@ impl Default for HttpConfig {
     }
 }
 
+// Player registry tuning. Every `*_pattern` is an optional Rust-regex override;
+// when absent the built-in vanilla default (see players.rs) is used. This keeps
+// the core thin/vanilla by default while supporting non-vanilla server forks.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlayersConfig {
+    #[serde(default = "default_players_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_pos_timeout_ms")]
+    pub pos_timeout_ms: u64,
+    #[serde(default)]
+    pub join_pattern: Option<String>,
+    #[serde(default)]
+    pub leave_pattern: Option<String>,
+    #[serde(default)]
+    pub login_pattern: Option<String>,
+    #[serde(default)]
+    pub uuid_pattern: Option<String>,
+    #[serde(default)]
+    pub pos_pattern: Option<String>,
+    #[serde(default)]
+    pub dim_pattern: Option<String>,
+}
+fn default_players_enabled() -> bool {
+    true
+}
+fn default_pos_timeout_ms() -> u64 {
+    3_000
+}
+impl Default for PlayersConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_players_enabled(),
+            pos_timeout_ms: default_pos_timeout_ms(),
+            join_pattern: None,
+            leave_pattern: None,
+            login_pattern: None,
+            uuid_pattern: None,
+            pos_pattern: None,
+            dim_pattern: None,
+        }
+    }
+}
+
+// RCON is detected, never assumed: `enabled = None` means "auto-detect from the
+// server's server.properties"; an explicit value overrides it. host/port/password
+// likewise override what server.properties advertises.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RconConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default = "default_rcon_host")]
+    pub host: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+fn default_rcon_host() -> String {
+    "127.0.0.1".into()
+}
+impl Default for RconConfig {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            host: default_rcon_host(),
+            port: None,
+            password: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct McrwConfig {
     #[serde(default)]
     pub python: PythonConfig,
     #[serde(default)]
     pub http: HttpConfig,
+    #[serde(default)]
+    pub players: PlayersConfig,
+    #[serde(default)]
+    pub rcon: RconConfig,
 }
 
 pub fn load_mcrw_config(path: &Path) -> Arc<McrwConfig> {
@@ -307,6 +459,9 @@ pub struct PluginApi {
     cmd_tx: mpsc::Sender<String>,
     cron_jobs: CronJobList,
     http_client: reqwest::Client,
+    player_registry: Arc<PlayerRegistry>,
+    join_triggers: PlayerCallbackList,
+    leave_triggers: PlayerCallbackList,
 }
 
 impl UserData for PluginApi {
@@ -373,6 +528,47 @@ impl UserData for PluginApi {
                 Ok(())
             },
         );
+
+        // Fired with a PlayerHandle when a player joins / leaves the game.
+        methods.add_method(
+            "register_on_join",
+            |lua: &Lua, this: &Self, func: Function| {
+                let callback = lua.create_registry_value(func)?;
+                this.join_triggers.lock().unwrap().push(callback);
+                Ok(())
+            },
+        );
+        methods.add_method(
+            "register_on_leave",
+            |lua: &Lua, this: &Self, func: Function| {
+                let callback = lua.create_registry_value(func)?;
+                this.leave_triggers.lock().unwrap().push(callback);
+                Ok(())
+            },
+        );
+
+        // Online player handles (array). Static fields read the cache; pos()/
+        // dimension() fetch live data.
+        methods.add_method("players", |lua: &Lua, this: &Self, ()| {
+            let t = lua.create_table()?;
+            for (i, name) in this.player_registry.online_names().into_iter().enumerate() {
+                t.set(i + 1, PlayerHandle::new(this.player_registry.clone(), name))?;
+            }
+            Ok(t)
+        });
+
+        // A single player handle, or nil if the name has never been seen.
+        methods.add_method("player", |_lua: &Lua, this: &Self, name: String| {
+            Ok(this
+                .player_registry
+                .snapshot(&name)
+                .map(|_| PlayerHandle::new(this.player_registry.clone(), name)))
+        });
+
+        // True when a live RCON connection backs the active-query path.
+        methods.add_method("is_rcon", |_lua: &Lua, this: &Self, ()| {
+            Ok(this.player_registry.is_rcon())
+        });
 
         methods.add_method(
             "register_start",
@@ -842,6 +1038,9 @@ pub struct ServerApi {
     pub cmd_tx: mpsc::Sender<String>,
     pub cron_jobs: CronJobList,
     pub http_client: reqwest::Client,
+    pub player_registry: Arc<PlayerRegistry>,
+    pub join_triggers: PlayerCallbackList,
+    pub leave_triggers: PlayerCallbackList,
 }
 
 impl UserData for ServerApi {
@@ -880,6 +1079,9 @@ impl UserData for ServerApi {
                     cmd_tx: this.cmd_tx.clone(),
                     cron_jobs: this.cron_jobs.clone(),
                     http_client: this.http_client.clone(),
+                    player_registry: this.player_registry.clone(),
+                    join_triggers: this.join_triggers.clone(),
+                    leave_triggers: this.leave_triggers.clone(),
                 })
             },
         );
@@ -1010,6 +1212,8 @@ pub fn reload_plugins(
     lifecycle_events: &LifecycleEvents,
     children: &ChildTracker,
     cron_jobs: &CronJobList,
+    join_triggers: &PlayerCallbackList,
+    leave_triggers: &PlayerCallbackList,
 ) -> mlua::Result<()> {
     tprintln!("[MCRW] Reloading plugins...");
 
@@ -1029,7 +1233,11 @@ pub fn reload_plugins(
     stop_triggers.lock().unwrap().clear();
     crash_triggers.lock().unwrap().clear();
     cron_jobs.lock().unwrap().clear();
+    join_triggers.lock().unwrap().clear();
+    leave_triggers.lock().unwrap().clear();
     plugins.lock().unwrap().clear();
+    // NB: the player registry's online set/records are intentionally preserved
+    // across reload — a reload must not lose who is online.
 
     {
         let new_map =

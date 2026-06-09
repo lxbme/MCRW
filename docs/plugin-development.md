@@ -575,6 +575,62 @@ even with no jobs to fire (a defensive cap against wall-clock steps and
 DST edges). Within that envelope, fire times are precise to ~100 ms.
 Schedules requiring sub-second precision are not supported.
 
+### 4.7. Player Join/Leave Events
+
+The wrapper maintains a built-in **player registry** by parsing the server's
+stdout, so plugins no longer need their own join/leave regexes. Subscribe with:
+
+```lua
+wrapper:register_on_join(function(p)
+    wrapper:log(p.name .. " joined (first seen at " .. tostring(p.first_join) .. ")")
+    return { "say Welcome, " .. p.name .. "!" }
+end)
+
+wrapper:register_on_leave(function(p)
+    wrapper:log(p.name .. " left")
+end)
+```
+
+Each callback receives a **player handle** (`mcrw.Player`) and, like triggers,
+may return a list of commands. Both lists are cleared and re-registered on
+`!reload`; the online set itself is preserved across a reload.
+
+### 4.8. Player Registry & Live Queries
+
+Query the registry at any time:
+
+```lua
+for _, p in ipairs(wrapper:players()) do   -- online players
+    wrapper:log(p.name)
+end
+
+local p = wrapper:player("Steve")          -- nil if never seen
+if p and p.online then
+    local pos = p:pos()                    -- {x=, y=, z=} or nil
+    if pos then
+        wrapper:log(("Steve is at %.1f %.1f %.1f"):format(pos.x, pos.y, pos.z))
+    end
+    local dim = p:dimension()              -- e.g. "minecraft:overworld" or nil
+end
+```
+
+**Handle fields** (read from the cached registry state, no roundtrip):
+`name`, `uuid`, `ip`, `online`, `first_join`, `last_seen`, `join_time`.
+Timestamps are unix seconds; `first_join`/`last_seen` persist across restarts
+(stored in `.mcrw/players.json`), while `online`/`join_time` are session state.
+
+**Live queries** (`p:pos()`, `p:dimension()`) yield the current coroutine until
+the value resolves. They return `nil` for an offline player. When the server's
+RCON is available the query goes over RCON (the response is reliably correlated
+to the request); otherwise the wrapper falls back to issuing a `data get entity`
+command and correlating the echoed stdout line by player name — which is subject
+to a timeout (default 3000 ms, see `[players].pos_timeout_ms`). Check
+`wrapper:is_rcon()` to know which path is active.
+
+> **Server-flavor note.** The default log patterns target vanilla. On forks
+> whose join/leave/login lines differ, override them under `[players]` in
+> `mcrw.toml` (§5.2).
+
 ---
 
 ## 5. Plugin Configuration
@@ -626,6 +682,25 @@ default_timeout_ms = 30000       # Default per-call timeout for wrapper:run_pyth
 
 [http]
 default_timeout_ms = 30000       # Default per-request timeout for wrapper:http_request
+
+[players]
+enabled        = true            # Master switch for the player registry (§4.7/§4.8)
+pos_timeout_ms = 3000            # Stdio-fallback timeout for p:pos()/p:dimension()
+# Optional Rust-regex overrides for non-vanilla server flavors. Omit to use the
+# built-in vanilla defaults. Capture groups must match the documented order.
+# join_pattern  = '...'          # captures: name
+# leave_pattern = '...'          # captures: name
+# login_pattern = '...'          # captures: name, ip
+# uuid_pattern  = '...'          # captures: name, uuid
+# pos_pattern   = '...'          # captures: name, x, y, z
+# dim_pattern   = '...'          # captures: name, dim
+
+[rcon]
+# RCON is auto-detected from server.properties; this section only overrides it.
+# enabled  = true                # Omit to auto-detect from server.properties' enable-rcon
+# host     = "127.0.0.1"
+# port     = 25575               # Omit to use server.properties' rcon.port
+# password = "..."               # Omit to use server.properties' rcon.password
 ```
 
 The file is optional. When absent, all values default as shown above.

@@ -22,10 +22,13 @@ use tokio::{
 
 use crate::{teprintln, tprintln};
 
+use std::sync::Arc;
+
 use crate::lua_ctx::{
-    self, ChildTracker, ControlMsg, CrashTriggerList, CronJobList, LifecycleEvents, PluginRegistry,
-    StopTriggerList, TriggerList,
+    self, ChildTracker, ControlMsg, CrashTriggerList, CronJobList, LifecycleEvents, PlayerCallbackList,
+    PlayerHandle, PluginRegistry, StopTriggerList, TriggerList,
 };
+use crate::players::{PlayerEvent, PlayerRegistry};
 
 pub fn spawn_cmd_sender(mut rx: mpsc::Receiver<String>, mut mc_stdin: tokio::process::ChildStdin) {
     // Forwards channel-supplied commands to the Minecraft server's stdin, one
@@ -177,6 +180,9 @@ pub async fn run_main_loop(
     lifecycle_events: LifecycleEvents,
     children: ChildTracker,
     cron_jobs: CronJobList,
+    player_registry: Arc<PlayerRegistry>,
+    join_triggers: PlayerCallbackList,
+    leave_triggers: PlayerCallbackList,
     mut ctl_rx: mpsc::Receiver<ControlMsg>,
     lua: &Lua,
 ) {
@@ -195,6 +201,39 @@ pub async fn run_main_loop(
                     }
                 };
                 tprintln!("[MC] {}", line);
+
+                // Feed every line to the player registry first: it updates cached
+                // records and resolves any in-flight pos()/dimension() waiters, and
+                // returns join/leave events for us to dispatch to Lua callbacks.
+                let player_pending: Vec<(Function, PlayerHandle)> = {
+                    let events = player_registry.observe_line(&line);
+                    let mut v = Vec::new();
+                    for ev in &events {
+                        let (list, name) = match ev {
+                            PlayerEvent::Joined(n) => (&join_triggers, n),
+                            PlayerEvent::Left(n) => (&leave_triggers, n),
+                        };
+                        let g = match list.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                teprintln!("[MCRW] [ERROR] player trigger lock poisoned: {e}");
+                                continue;
+                            }
+                        };
+                        for cb in g.iter() {
+                            match lua.registry_value::<Function>(cb) {
+                                Ok(f) => v.push((
+                                    f,
+                                    PlayerHandle::new(player_registry.clone(), name.clone()),
+                                )),
+                                Err(e) => {
+                                    teprintln!("[MCRW] [ERROR] player registry lookup: {e}")
+                                }
+                            }
+                        }
+                    }
+                    v
+                };
 
                 // Snapshot matching (Function, args) tuples + lifecycle callbacks under
                 // their locks, then hand the whole dispatch off to a spawned task. This
@@ -264,11 +303,21 @@ pub async fn run_main_loop(
                     funcs
                 };
 
-                if !pending.is_empty() || !lifecycle_pending.is_empty() {
+                if !pending.is_empty() || !lifecycle_pending.is_empty() || !player_pending.is_empty()
+                {
                     let tx_line = tx_main.clone();
                     let line_for_lc = line;
                     tokio::spawn(async move {
                         let mut commands_to_exec: Vec<String> = Vec::new();
+                        for (f, handle) in player_pending {
+                            match f.call_async::<Option<Vec<String>>>(handle).await {
+                                Ok(Some(cmds)) => commands_to_exec.extend(cmds),
+                                Ok(None) => {}
+                                Err(e) => {
+                                    teprintln!("[MCRW] [ERROR] player callback failed: {e}")
+                                }
+                            }
+                        }
                         for (f, args) in pending {
                             match f
                                 .call_async::<Option<Vec<String>>>(Variadic::from_iter(args))
@@ -314,6 +363,8 @@ pub async fn run_main_loop(
                             &lifecycle_events,
                             &children,
                             &cron_jobs,
+                            &join_triggers,
+                            &leave_triggers,
                         ) {
                             teprintln!("[MCRW] [ERROR] reload failed: {}", e);
                         }
@@ -373,9 +424,14 @@ pub async fn check_shutdown(
     mut child: tokio::process::Child,
     stop_triggers: StopTriggerList,
     crash_triggers: CrashTriggerList,
+    player_registry: Arc<PlayerRegistry>,
 ) {
     match child.wait().await {
         Ok(status) => {
+            // The server is gone — no leave lines will arrive. Mark everyone
+            // offline (refreshing last_seen) and flush before plugin callbacks run.
+            player_registry.mark_all_offline();
+            player_registry.flush();
             if status.success() {
                 println!("[MCRW] Minecraft server stopped gracefully (Exit Code: 0).");
                 let funcs: Vec<Function> = {

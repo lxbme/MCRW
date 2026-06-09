@@ -16,6 +16,8 @@
 
 mod handler;
 mod lua_ctx;
+mod players;
+mod rcon;
 mod term;
 mod utils;
 
@@ -25,7 +27,7 @@ use rustyline::DefaultEditor;
 use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -34,8 +36,9 @@ use tokio::sync::mpsc;
 
 use crate::lua_ctx::{
     ChildIdCounter, ChildTracker, ControlMsg, CrashTriggerList, CronJobList, LifecycleEvents,
-    PluginRegistry, ServerApi, StopTriggerList,
+    PlayerCallbackList, PluginRegistry, ServerApi, StopTriggerList,
 };
+use crate::players::PlayerRegistry;
 
 #[tokio::main]
 async fn main() {
@@ -61,6 +64,27 @@ async fn main() {
     // init game command channel — created here (ahead of ServerApi) so the
     // sender can be cloned into ServerApi for the new wrapper:command API.
     let (tx, rx) = mpsc::channel::<String>(max_cmd_queue);
+
+    // Player registry: parses join/leave from stdout, answers pos()/dimension()
+    // live queries (via cmd_tx), and persists cross-session fields to
+    // .mcrw/players.json. Shared between the dispatch loop and the Lua context.
+    let mut registry = PlayerRegistry::new(
+        &mcrw_config.players,
+        tx.clone(),
+        PathBuf::from(".mcrw/players.json"),
+    );
+    // RCON is detected, never assumed: only attach a handle when server.properties
+    // (or an [rcon] override) actually enables it. The connection itself is lazy.
+    if let Some(info) = rcon::resolve_settings(&mcrw_config.rcon) {
+        println!(
+            "[MCRW] RCON enabled (target {}:{}); live queries will prefer RCON.",
+            info.host, info.port
+        );
+        registry.set_rcon(rcon::RconHandle::spawn(info));
+    }
+    let player_registry = Arc::new(registry);
+    let join_triggers: PlayerCallbackList = Arc::new(Mutex::new(Vec::new()));
+    let leave_triggers: PlayerCallbackList = Arc::new(Mutex::new(Vec::new()));
 
     // Interactive console: when stdin/stdout are a real terminal, run an
     // rustyline line editor (Up/Down history, line editing). Its ExternalPrinter
@@ -109,6 +133,9 @@ async fn main() {
         cmd_tx: tx.clone(),
         cron_jobs: cron_jobs.clone(),
         http_client,
+        player_registry: player_registry.clone(),
+        join_triggers: join_triggers.clone(),
+        leave_triggers: leave_triggers.clone(),
     };
     lua.globals()
         .set("Server", server_api)
@@ -171,6 +198,9 @@ async fn main() {
         lifecycle_events.clone(),
         children.clone(),
         cron_jobs.clone(),
+        player_registry.clone(),
+        join_triggers.clone(),
+        leave_triggers.clone(),
         ctl_rx,
         &lua,
     )
@@ -178,5 +208,12 @@ async fn main() {
 
     println!("[MCRW] Stdout stream ended. Waiting for process exit status...");
 
-    handler::check_shutdown(&lua, child, stop_triggers.clone(), crash_triggers.clone()).await;
+    handler::check_shutdown(
+        &lua,
+        child,
+        stop_triggers.clone(),
+        crash_triggers.clone(),
+        player_registry.clone(),
+    )
+    .await;
 }

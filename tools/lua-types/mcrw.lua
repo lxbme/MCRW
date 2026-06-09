@@ -83,6 +83,41 @@
 ---@field headers table<string,string> Response headers, with lowercased names.
 ---@field body string                The full response body as a string. Use `wrapper:json_decode` to parse JSON.
 
+--- A live player position, as returned by `Player:pos()`.
+---@class mcrw.Pos
+---@field x number
+---@field y number
+---@field z number
+
+--- A player handle, returned by `wrapper:players()` / `wrapper:player()` and
+--- passed to join/leave callbacks. The fields are read from the cached registry
+--- state; `pos()`/`dimension()` fetch live data on demand.
+---@class mcrw.Player
+---@field name string             The player name.
+---@field uuid string|nil         UUID, once seen in the auth log; nil otherwise.
+---@field ip string|nil           Last login IP, if known.
+---@field online boolean          Whether the player is currently online.
+---@field first_join integer|nil  Unix seconds of the first-ever join (persisted across restarts).
+---@field last_seen integer       Unix seconds of the last seen join/leave.
+---@field join_time integer|nil   Unix seconds of the current session's join; nil when offline.
+local Player = {}
+
+--- Live coordinates for this player. Yields until the lookup resolves. Returns
+--- nil if the player is offline, or (on the stdio path) if it times out. Uses
+--- RCON when connected (reliable), else issues a `data get` and correlates the
+--- echoed response by name.
+---@return mcrw.Pos|nil
+function Player:pos() end
+
+--- Live dimension for this player (e.g. "minecraft:overworld"), or nil if
+--- offline/timed-out. Same mechanism as `Player:pos()`.
+---@return string|nil
+function Player:dimension() end
+
+--- Join/leave callback. Receives the affected player handle; may return a list
+--- of commands to run.
+---@alias mcrw.PlayerCallback fun(player: mcrw.Player): mcrw.Commands
+
 --------------------------------------------------------------------------------
 -- The `wrapper` handle (per-plugin), returned by `Server:get_context`.
 --------------------------------------------------------------------------------
@@ -124,6 +159,34 @@ function Wrapper:register_on_stop(callback) end
 --- Register a callback for a server crash (non-zero exit code).
 ---@param callback mcrw.LifecycleCallback
 function Wrapper:register_on_crash(callback) end
+
+--- Register a callback fired when a player joins the game. The callback receives
+--- the player handle and may return commands.
+---@param callback mcrw.PlayerCallback
+function Wrapper:register_on_join(callback) end
+
+--- Register a callback fired when a player leaves the game.
+---@param callback mcrw.PlayerCallback
+function Wrapper:register_on_leave(callback) end
+
+--- Return handles for all currently-online players. The registry is populated by
+--- parsing the server's join/leave/login log lines (patterns are configurable in
+--- mcrw.toml's `[players]` section).
+---@return mcrw.Player[]
+function Wrapper:players() end
+
+--- Return a handle for `name`, or nil if the player has never been seen. A handle
+--- for a known-but-offline player still exposes its persisted fields.
+---@param name string
+---@return mcrw.Player|nil
+function Wrapper:player(name) end
+
+--- Whether a live RCON connection currently backs the active-query path
+--- (`Player:pos()`/`Player:dimension()`). RCON is auto-detected from
+--- `server.properties` (overridable via mcrw.toml's `[rcon]`); when unavailable
+--- the wrapper falls back to stdio parsing.
+---@return boolean
+function Wrapper:is_rcon() end
 
 --- Push a single command to the server immediately, without waiting for the
 --- current callback to return. Use this to emit commands from outside a
