@@ -72,7 +72,7 @@ mcrstw -Xmx1024M -Xms1024M -jar server.jar nogui
 
 If you built from source instead, run `./target/release/mcrstw ...` or `cargo run --release -- ...` with the same arguments.
 
-The console Arguments will be passed to Java without any modification.
+The console Arguments will be passed to Java without any modification, with one exception: if the first argument is `init`, MCRW runs the plugin scaffolder (`mcrstw init <name>`, see [Plugin Development](#plugin-development)) instead of starting the server.
 
 Once running, the wrapper will start the Minecraft server as a child process. You can interact with the server console directly through the terminal, and loaded Lua plugins will begin monitoring log output immediately.
 
@@ -91,6 +91,8 @@ Lines you type into the wrapper terminal are forwarded to the Minecraft server s
 > **For the complete reference**, see the [**Plugin Development Guide**](./docs/plugin-development.md) in `docs/`. It covers the full Lua API, lifecycle events, the Python escape hatch, the execution model, and configuration-file schemas. The section below is an overview.
 
 Plugins are located in the `lua_plugins/` directory. Each plugin must have an `init.lua` entry point and a `meta.toml` describing the plugin.
+
+To scaffold a new plugin, run `mcrstw init <name>` from your server directory. It generates `lua_plugins/<name>/` with a ready-to-edit `meta.toml`, a minimal `init.lua`, and a starter `config.json`.
 
 Example structure:
 

@@ -2,7 +2,7 @@
 
 | Applies To | Status                                                       | Updated    |
 |------------|--------------------------------------------------------------|------------|
-| MCRW ≥ 0.2.0 | Stable, except `wrapper:run_python` which is **Experimental** | 2026-05-21 |
+| MCRW ≥ 0.2.0 | Stable, except `wrapper:run_python` which is **Experimental** | 2026-06-10 |
 
 This document is the reference for authors of plugins targeting the Minecraft
 Rust Wrapper (MCRW, crate name `mcrstw`). It describes the on-disk plugin
@@ -86,6 +86,15 @@ installing arbitrary code on the host machine.** See
 ---
 
 ## 2. Plugin Anatomy
+
+> **Quick start.** Run `mcrstw init <name>` from the wrapper's working
+> directory to scaffold a new plugin. It creates `lua_plugins/<name>/` with a
+> ready-to-edit `meta.toml`, a minimal `init.lua` (a logged load message plus
+> a commented example trigger), and a starter `config.json`. The `<name>` must
+> be a valid directory and Lua module name: ASCII letters, digits and
+> underscores, not starting with a digit. The command refuses to overwrite an
+> existing plugin directory and exits without starting the server. The rest of
+> this section describes the layout it produces.
 
 ### 2.1. Directory Layout
 
