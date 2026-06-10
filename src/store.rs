@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::teprintln;
 use mlua::LuaSerdeExt;
 use mlua::{Lua, UserData, UserDataMethods, Value};
 use serde_json::Value as JsonValue;
@@ -148,7 +149,7 @@ impl StoreRegistry {
             serialize(&inner.namespaces)
         };
         if let Err(e) = write_json_atomic(&self.json_path, &json) {
-            eprintln!("[MCRW] [ERROR] writing store.json: {e}");
+            teprintln!("[MCRW] [ERROR] writing store.json: {e}");
         }
     }
 
@@ -165,7 +166,7 @@ impl StoreRegistry {
             serialize(&inner.namespaces)
         };
         if let Err(e) = write_json_atomic(&self.json_path, &json) {
-            eprintln!("[MCRW] [ERROR] writing store.json: {e}");
+            teprintln!("[MCRW] [ERROR] writing store.json: {e}");
         }
     }
 }
@@ -247,7 +248,7 @@ fn load_store(path: &Path) -> Namespaces {
     match serde_json::from_str(&content) {
         Ok(ns) => ns,
         Err(e) => {
-            eprintln!("[MCRW] [ERROR] parsing store.json: {e} (starting empty)");
+            teprintln!("[MCRW] [ERROR] parsing store.json: {e} (starting empty)");
             HashMap::new()
         }
     }
