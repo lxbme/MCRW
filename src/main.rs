@@ -18,6 +18,7 @@ mod handler;
 mod lua_ctx;
 mod players;
 mod rcon;
+mod scaffold;
 mod store;
 mod term;
 mod utils;
@@ -43,9 +44,16 @@ use crate::players::PlayerRegistry;
 
 #[tokio::main]
 async fn main() {
+    let server_args: Vec<String> = env::args().collect();
+
+    // Subcommands are intercepted before any server/Lua/RCON setup. `init`
+    // scaffolds a new plugin and exits; anything else is treated as java args.
+    if server_args.get(1).map(String::as_str) == Some("init") {
+        std::process::exit(run_init_command(&server_args));
+    }
+
     utils::print_logo();
     let max_cmd_queue = 1000;
-    let server_args: Vec<String> = env::args().collect();
 
     // prepare lua vm
     let lua = Lua::new();
@@ -230,4 +238,30 @@ async fn main() {
         store.clone(),
     )
     .await;
+}
+
+/// Handle `mcrstw init <name>`. Returns the process exit code. Plugins are
+/// scaffolded under `lua_plugins/` relative to the current working directory,
+/// matching where the wrapper loads them from at runtime.
+fn run_init_command(args: &[String]) -> i32 {
+    let Some(name) = args.get(2) else {
+        teprintln!("[MCRW] [ERROR] usage: mcrstw init <name>");
+        return 2;
+    };
+    match scaffold::run_init(Path::new("."), name) {
+        Ok(created) => {
+            tprintln!("[MCRW] Created plugin '{name}':");
+            for path in &created {
+                tprintln!("  - {}", path.display());
+            }
+            tprintln!(
+                "[MCRW] Edit lua_plugins/{name}/init.lua, then start the server to load it."
+            );
+            0
+        }
+        Err(e) => {
+            teprintln!("[MCRW] [ERROR] {e}");
+            1
+        }
+    }
 }
