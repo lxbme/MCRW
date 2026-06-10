@@ -767,6 +767,9 @@ The `mcrw.toml` file, located next to `server.jar`, holds wrapper-wide
 configuration that is not specific to any one plugin. Its current schema:
 
 ```toml
+[server]
+java = "java"                    # Path or PATH-lookup name for the Java executable
+
 [python]
 interpreter        = "python3"   # Path or PATH-lookup name for the Python interpreter
 default_timeout_ms = 30000       # Default per-call timeout for wrapper:run_python
@@ -1661,6 +1664,7 @@ more lifecycle events.
 
 | Section    | Field                | Type    | Default     | Notes                                                                  |
 |------------|----------------------|---------|-------------|------------------------------------------------------------------------|
+| `[server]` | `java`               | string  | `"java"`    | Java executable used to launch the server; resolved against `$PATH` if not absolute. The arguments after it come from the wrapper's command line, not this file. |
 | `[python]` | `interpreter`        | string  | `"python3"` | Interpreter binary; resolved against `$PATH` if not absolute.          |
 | `[python]` | `default_timeout_ms` | integer | `30000`     | Default per-call timeout for `wrapper:run_python` (milliseconds).      |
 | `[http]`   | `default_timeout_ms` | integer | `30000`     | Default per-request timeout for `wrapper:http_request` (milliseconds). |

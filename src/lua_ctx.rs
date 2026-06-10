@@ -318,8 +318,26 @@ impl Default for RconConfig {
     }
 }
 
+// The wrapped server process. Only the Java executable is configurable; the
+// args following it on the command line are still passed through verbatim.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    #[serde(default = "default_java")]
+    pub java: String,
+}
+fn default_java() -> String {
+    "java".into()
+}
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self { java: default_java() }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct McrwConfig {
+    #[serde(default)]
+    pub server: ServerConfig,
     #[serde(default)]
     pub python: PythonConfig,
     #[serde(default)]
@@ -337,6 +355,9 @@ pub struct McrwConfig {
 const DEFAULT_MCRW_TOML: &str = r#"# mcrw.toml — MCRW wrapper configuration.
 # Auto-generated with default values on first run. Edit and restart to apply.
 # Every value below is optional and falls back to the built-in default shown.
+
+[server]
+java = "java"                    # Path or PATH-lookup name for the Java executable
 
 [python]
 interpreter        = "python3"   # Path or PATH-lookup name for the Python interpreter
@@ -1553,6 +1574,24 @@ mod tests {
         assert_eq!(parsed.rcon.host, def.rcon.host);
         assert_eq!(parsed.rcon.port, def.rcon.port);
         assert_eq!(parsed.rcon.timeout_ms, def.rcon.timeout_ms);
+        assert_eq!(parsed.server.java, def.server.java);
+    }
+
+    // A mcrw.toml that predates the [server] section must still load, with the
+    // java executable defaulting to "java" (backward compatible).
+    #[test]
+    fn missing_server_section_defaults_java() {
+        let cfg: McrwConfig = toml::from_str("[python]\ninterpreter = \"python3\"\n")
+            .expect("parses without [server]");
+        assert_eq!(cfg.server.java, "java");
+    }
+
+    // An explicit [server] java path overrides the default.
+    #[test]
+    fn explicit_server_java_overrides_default() {
+        let cfg: McrwConfig =
+            toml::from_str("[server]\njava = \"/opt/jdk/bin/java\"\n").expect("parses [server]");
+        assert_eq!(cfg.server.java, "/opt/jdk/bin/java");
     }
 
     // The generated trigger_config.toml is all-comments, so it parses to an empty
