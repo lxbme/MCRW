@@ -183,7 +183,11 @@ async fn main() {
         "[MCRW] Starting server with args: {}",
         server_args[1..].join(" ")
     );
-    let mut child = Command::new("java")
+    let java = &mcrw_config.server.java;
+    if java != "java" {
+        tprintln!("[MCRW] Using configured Java executable: {java}");
+    }
+    let mut child = Command::new(java)
         .args(&server_args[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -74,6 +74,8 @@ If you built from source instead, run `./target/release/mcrstw ...` or `cargo ru
 
 The console Arguments will be passed to Java without any modification, with one exception: if the first argument is `init`, MCRW runs the plugin scaffolder (`mcrstw init <name>`, see [Plugin Development](#plugin-development)) instead of starting the server.
 
+By default the `java` executable is found on your `$PATH`. To use a specific JDK, set `java` under the `[server]` section of `mcrw.toml` (e.g. `java = "/opt/jdk/bin/java"`); the command-line arguments above are still passed through unchanged.
+
 Once running, the wrapper will start the Minecraft server as a child process. You can interact with the server console directly through the terminal, and loaded Lua plugins will begin monitoring log output immediately.
 
 ### Wrapper Console Commands
