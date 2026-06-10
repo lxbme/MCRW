@@ -437,12 +437,12 @@ pub async fn check_shutdown(
             player_registry.flush();
             store.flush();
             if status.success() {
-                println!("[MCRW] Minecraft server stopped gracefully (Exit Code: 0).");
+                tprintln!("[MCRW] Minecraft server stopped gracefully (Exit Code: 0).");
                 let funcs: Vec<Function> = {
                     let g = match stop_triggers.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            eprintln!("[MCRW] [ERROR] stop_triggers lock poisoned: {e}");
+                            teprintln!("[MCRW] [ERROR] stop_triggers lock poisoned: {e}");
                             return;
                         }
                     };
@@ -450,7 +450,7 @@ pub async fn check_shutdown(
                         .filter_map(|st| match lua.registry_value::<Function>(&st.callback) {
                             Ok(f) => Some(f),
                             Err(e) => {
-                                eprintln!("[MCRW] [ERROR] stop registry lookup: {e}");
+                                teprintln!("[MCRW] [ERROR] stop registry lookup: {e}");
                                 None
                             }
                         })
@@ -458,12 +458,12 @@ pub async fn check_shutdown(
                 };
                 for f in funcs {
                     if let Err(e) = f.call_async::<()>(()).await {
-                        eprintln!("[MCRW] [ERROR] stop callback failed: {}", e);
+                        teprintln!("[MCRW] [ERROR] stop callback failed: {}", e);
                     }
                 }
             } else {
                 let code = status.code().unwrap_or(-1);
-                eprintln!(
+                teprintln!(
                     "[MCRW] [WARNING] Minecraft server crashed or stopped unexpectedly! (Exit Code: {})",
                     code
                 );
@@ -471,7 +471,7 @@ pub async fn check_shutdown(
                     let g = match crash_triggers.lock() {
                         Ok(g) => g,
                         Err(e) => {
-                            eprintln!("[MCRW] [ERROR] crash_triggers lock poisoned: {e}");
+                            teprintln!("[MCRW] [ERROR] crash_triggers lock poisoned: {e}");
                             return;
                         }
                     };
@@ -479,7 +479,7 @@ pub async fn check_shutdown(
                         .filter_map(|ct| match lua.registry_value::<Function>(&ct.callback) {
                             Ok(f) => Some(f),
                             Err(e) => {
-                                eprintln!("[MCRW] [ERROR] crash registry lookup: {e}");
+                                teprintln!("[MCRW] [ERROR] crash registry lookup: {e}");
                                 None
                             }
                         })
@@ -487,13 +487,13 @@ pub async fn check_shutdown(
                 };
                 for f in funcs {
                     if let Err(e) = f.call_async::<()>(()).await {
-                        eprintln!("[MCRW] [ERROR] crash callback failed: {}", e);
+                        teprintln!("[MCRW] [ERROR] crash callback failed: {}", e);
                     }
                 }
             }
         }
         Err(e) => {
-            eprintln!("[MCRW] [ERROR] Failed to wait on child process: {}", e);
+            teprintln!("[MCRW] [ERROR] Failed to wait on child process: {}", e);
         }
     }
 }

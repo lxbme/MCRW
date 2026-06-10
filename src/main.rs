@@ -74,7 +74,7 @@ async fn main() {
     // One handle is shared by the player registry (pos/dimension) and the Lua
     // wrapper:rcon_command API.
     let rcon_handle = rcon::resolve_settings(&mcrw_config.rcon).map(|info| {
-        println!(
+        tprintln!(
             "[MCRW] RCON enabled (target {}:{}); live queries will prefer RCON.",
             info.host, info.port
         );
@@ -104,7 +104,7 @@ async fn main() {
     // instead of clobbering it. Built here (ahead of ServerApi/load_plugins) for
     // exactly that ordering; the editor itself is moved into its own thread
     // later. When NOT a TTY (piped stdin, nohup, CI), we skip the editor and use
-    // the plain line reader, and the `term` macros fall back to println!.
+    // the plain line reader, and the `term` macros fall back to tprintln!.
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let mut console_editor: Option<DefaultEditor> = None;
     if interactive {
@@ -114,11 +114,11 @@ async fn main() {
                     term::install(Box::new(printer));
                     console_editor = Some(editor);
                 }
-                Err(e) => eprintln!(
+                Err(e) => teprintln!(
                     "[MCRW] [WARNING] external printer unavailable ({e}); console history disabled"
                 ),
             },
-            Err(e) => eprintln!(
+            Err(e) => teprintln!(
                 "[MCRW] [WARNING] line editor unavailable ({e}); console history disabled"
             ),
         }
@@ -158,12 +158,12 @@ async fn main() {
     lua_ctx::load_plugins(&lua, &plugins).expect("[MCRW] [PANIC] Fail to load plugins");
     {
         let plugins_guard = plugins.lock().unwrap();
-        println!("[MCRW] Loaded {} plugins:", plugins_guard.len());
+        tprintln!("[MCRW] Loaded {} plugins:", plugins_guard.len());
         for (dirname, meta) in plugins_guard.iter() {
-            println!("  - {} v{} (dir: {})", meta.name, meta.version, dirname);
+            tprintln!("  - {} v{} (dir: {})", meta.name, meta.version, dirname);
         }
     }
-    println!(
+    tprintln!(
         "[MCRW] Lua script loaded. Registered {} regex triggers, {} stop functions, {} crash functions.",
         triggers.lock().unwrap().len(),
         stop_triggers.lock().unwrap().len(),
@@ -171,7 +171,7 @@ async fn main() {
     );
 
     // start minecraft server
-    println!(
+    tprintln!(
         "[MCRW] Starting server with args: {}",
         server_args[1..].join(" ")
     );
@@ -181,7 +181,7 @@ async fn main() {
         .stdout(Stdio::piped())
         .spawn()
         .expect("[MCRW] [PANIC] Fail to minecraft server");
-    println!("[MCRW] Server Started.");
+    tprintln!("[MCRW] Server Started.");
 
     let stdout = child.stdout.take().expect("Failed to open stdout");
     let stdin = child.stdin.take().expect("Failed to open stdin");
@@ -219,7 +219,7 @@ async fn main() {
     )
     .await;
 
-    println!("[MCRW] Stdout stream ended. Waiting for process exit status...");
+    tprintln!("[MCRW] Stdout stream ended. Waiting for process exit status...");
 
     handler::check_shutdown(
         &lua,

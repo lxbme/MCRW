@@ -39,7 +39,7 @@ use tokio::sync::mpsc;
 use crate::players::PlayerRegistry;
 use crate::rcon::RconHandle;
 use crate::store::{StoreHandle, StoreRegistry};
-use crate::tprintln;
+use crate::{teprintln, tprintln};
 
 pub struct Trigger {
     pub regex: Regex,
@@ -372,11 +372,11 @@ pub fn load_mcrw_config(path: &Path) -> Arc<McrwConfig> {
         // editable. A write failure (e.g. read-only dir) is non-fatal — we just
         // run on built-in defaults.
         match fs::write(path, DEFAULT_MCRW_TOML) {
-            Ok(_) => println!(
+            Ok(_) => tprintln!(
                 "[MCRW] No mcrw.toml found; wrote a default to {}",
                 path.display()
             ),
-            Err(e) => eprintln!(
+            Err(e) => teprintln!(
                 "[MCRW] [WARNING] could not write default mcrw.toml ({e}); using built-in defaults"
             ),
         }
@@ -385,16 +385,16 @@ pub fn load_mcrw_config(path: &Path) -> Arc<McrwConfig> {
     match fs::read_to_string(path) {
         Ok(s) => match toml::from_str::<McrwConfig>(&s) {
             Ok(cfg) => {
-                println!("[MCRW] Loaded mcrw.toml");
+                tprintln!("[MCRW] Loaded mcrw.toml");
                 Arc::new(cfg)
             }
             Err(e) => {
-                eprintln!("[MCRW] [ERROR] parse mcrw.toml: {} (using defaults)", e);
+                teprintln!("[MCRW] [ERROR] parse mcrw.toml: {} (using defaults)", e);
                 Arc::new(McrwConfig::default())
             }
         },
         Err(e) => {
-            eprintln!("[MCRW] [ERROR] read mcrw.toml: {e} (using defaults)");
+            teprintln!("[MCRW] [ERROR] read mcrw.toml: {e} (using defaults)");
             Arc::new(McrwConfig::default())
         }
     }
@@ -454,11 +454,11 @@ pub fn load_trigger_config(path: &Path) -> TriggerConfig {
         // First run: drop a documented template (all comments → no behavior
         // change; the built-in patterns below still apply).
         match fs::write(path, DEFAULT_TRIGGER_CONFIG_TOML) {
-            Ok(_) => println!(
+            Ok(_) => tprintln!(
                 "[MCRW] No trigger_config.toml found; wrote a default to {}",
                 path.display()
             ),
-            Err(e) => eprintln!(
+            Err(e) => teprintln!(
                 "[MCRW] [WARNING] could not write default trigger_config.toml ({e}); using built-ins"
             ),
         }
@@ -470,9 +470,9 @@ pub fn load_trigger_config(path: &Path) -> TriggerConfig {
                 for (k, v) in user.events {
                     cfg.events.insert(k, v);
                 }
-                println!("[MCRW] Loaded trigger_config.toml");
+                tprintln!("[MCRW] Loaded trigger_config.toml");
             }
-            Err(e) => eprintln!("[MCRW] [ERROR] parse trigger_config.toml: {}", e),
+            Err(e) => teprintln!("[MCRW] [ERROR] parse trigger_config.toml: {}", e),
         }
     }
     cfg
@@ -491,7 +491,7 @@ pub fn compile_trigger_config(cfg: TriggerConfig) -> HashMap<String, LifecycleEv
                         fired: false,
                     }),
                     Err(e) => {
-                        eprintln!(
+                        teprintln!(
                             "[MCRW] [ERROR] regex for event '{}': {} (pattern: {})",
                             name, e, p.text
                         );
@@ -527,14 +527,14 @@ fn read_op_names() -> Vec<String> {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            eprintln!("[MCRW] [ERROR] reading ops.json: {e}");
+            teprintln!("[MCRW] [ERROR] reading ops.json: {e}");
             return Vec::new();
         }
     };
     match serde_json::from_str::<Vec<OpEntry>>(&content) {
         Ok(list) => list.into_iter().map(|o| o.name).collect(),
         Err(e) => {
-            eprintln!("[MCRW] [ERROR] parsing ops.json: {e}");
+            teprintln!("[MCRW] [ERROR] parsing ops.json: {e}");
             Vec::new()
         }
     }
@@ -968,7 +968,7 @@ async fn http_request_impl(
         .map_err(|e| mlua::Error::external(format!("wrapper:http_request: {e}")))?;
 
     let status = resp.status();
-    println!(
+    tprintln!(
         "[{}] HTTP {} {} -> {}",
         plugin,
         method_str.to_uppercase(),
@@ -1266,12 +1266,12 @@ pub fn load_plugins(lua: &Lua, registry: &PluginRegistry) -> mlua::Result<()> {
             }) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[MCRW] [ERROR] skip plugin '{}': {}", dirname, e);
+                teprintln!("[MCRW] [ERROR] skip plugin '{}': {}", dirname, e);
                 continue;
             }
         };
 
-        println!(
+        tprintln!(
             "[MCRW] Loading plugin: {} v{} (dir: {})",
             meta.name, meta.version, dirname
         );
@@ -1285,7 +1285,7 @@ pub fn load_plugins(lua: &Lua, registry: &PluginRegistry) -> mlua::Result<()> {
         let module_name = format!("lua_plugins.{}.", dirname);
 
         if let Err(e) = require.call::<Value>(module_name) {
-            eprintln!("[Error] Failed to load plugin {}: {}", dirname, e);
+            teprintln!("[Error] Failed to load plugin {}: {}", dirname, e);
             registry.lock().unwrap().remove(&dirname);
         }
     }
@@ -1316,7 +1316,7 @@ pub fn drain_due_cron_jobs(
     let mut g = match jobs.lock() {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("[MCRW] [ERROR] cron_jobs lock poisoned: {e}");
+            teprintln!("[MCRW] [ERROR] cron_jobs lock poisoned: {e}");
             return Vec::new();
         }
     };
@@ -1335,7 +1335,7 @@ pub fn drain_due_cron_jobs(
                 job.plugin.clone(),
                 job.expr.clone(),
             )),
-            Err(e) => eprintln!(
+            Err(e) => teprintln!(
                 "[MCRW] [ERROR] cron registry lookup ({} / {}): {e}",
                 job.plugin, job.expr
             ),

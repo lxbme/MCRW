@@ -38,6 +38,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::teprintln;
 use crate::lua_ctx::PlayersConfig;
 use crate::rcon::RconHandle;
 
@@ -127,7 +128,7 @@ fn compile_or_default(name: &str, over: &Option<String>, default: &str) -> Regex
     if let Some(p) = over {
         match Regex::new(p) {
             Ok(r) => return r,
-            Err(e) => eprintln!(
+            Err(e) => teprintln!(
                 "[MCRW] [ERROR] players.{name}_pattern invalid regex: {e} (using built-in default)"
             ),
         }
@@ -362,7 +363,7 @@ impl PlayerRegistry {
             serialize_records(&inner.records)
         };
         if let Err(e) = write_players_json(&self.json_path, &json) {
-            eprintln!("[MCRW] [ERROR] writing players.json: {e}");
+            teprintln!("[MCRW] [ERROR] writing players.json: {e}");
         }
     }
 
@@ -431,7 +432,7 @@ impl PlayerRegistry {
             serialize_records(&inner.records)
         };
         if let Err(e) = write_players_json(&self.json_path, &json) {
-            eprintln!("[MCRW] [ERROR] writing players.json: {e}");
+            teprintln!("[MCRW] [ERROR] writing players.json: {e}");
         }
     }
 }
@@ -483,7 +484,7 @@ fn load_records(path: &Path) -> HashMap<String, PlayerRecord> {
     let persisted: HashMap<String, PersistedRecord> = match serde_json::from_str(&content) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[MCRW] [ERROR] parsing players.json: {e} (starting empty)");
+            teprintln!("[MCRW] [ERROR] parsing players.json: {e} (starting empty)");
             return HashMap::new();
         }
     };
